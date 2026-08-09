@@ -1029,7 +1029,7 @@ func latestPricingRowUpdate(rows []EffectivePricingRow) *time.Time {
 			}
 		}
 		if row.Rates.UpdatedAt != nil {
-			t := row.Rates.UpdatedAt.UTC()
+			t := row.Rates.UpdatedAt.UTC().Round(time.Microsecond)
 			if latest == nil || t.After(*latest) {
 				latest = &t
 			}
@@ -1038,7 +1038,7 @@ func latestPricingRowUpdate(rows []EffectivePricingRow) *time.Time {
 			if band.UpdatedAt == nil {
 				continue
 			}
-			t := band.UpdatedAt.UTC()
+			t := band.UpdatedAt.UTC().Round(time.Microsecond)
 			if latest == nil || t.After(*latest) {
 				latest = &t
 			}
