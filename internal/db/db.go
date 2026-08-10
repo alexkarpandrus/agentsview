@@ -492,7 +492,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // new sources and need no re-parse.)
 // (108: OpenCode v2 tool results retain embedded file payloads. Existing
 // sessions need re-parsing to recover files omitted from stored results.)
-const dataVersion = 108
+// (109: Canonical message timestamps. Re-parse live sessions and blank unsupported
+// timestamps in orphaned and trashed sessions before strict Bun reads.)
+const dataVersion = 109
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
