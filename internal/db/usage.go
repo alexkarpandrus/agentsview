@@ -2778,6 +2778,8 @@ func (s *BunStore) GetDailyUsage(
 func (s *BunStore) getDailyUsageFrom(
 	ctx context.Context, store bun.IDB, f UsageFilter,
 ) (DailyUsageResult, error) {
+	arena := usageReadArenaPool.Get().(*usageReadArena)
+	defer arena.release()
 	loc := f.location()
 
 	pricing, err := s.loadPricingMapFrom(ctx, store)
@@ -2895,7 +2897,7 @@ func (s *BunStore) getDailyUsageFrom(
 		return nil
 	}
 	if err := s.streamDailyUsageRowsFrom(
-		ctx, store, f, true, false, processRow,
+		ctx, store, f, true, false, arena, processRow,
 	); err != nil {
 		return DailyUsageResult{}, fmt.Errorf("querying daily usage: %w", err)
 	}
@@ -3584,6 +3586,8 @@ func (s *BunStore) GetTopSessionsByCost(
 func (s *BunStore) getTopSessionsByCostFrom(
 	ctx context.Context, store bun.IDB, f UsageFilter, limit int,
 ) ([]TopSessionEntry, error) {
+	arena := usageReadArenaPool.Get().(*usageReadArena)
+	defer arena.release()
 	pricing, err := s.loadPricingMapFrom(ctx, store)
 	if err != nil {
 		return nil,
@@ -3591,7 +3595,7 @@ func (s *BunStore) getTopSessionsByCostFrom(
 	}
 	rateResolver := export.NewPricingResolver(pricing)
 
-	rows, err := s.loadDailyUsageRowsFrom(ctx, store, f, false, false)
+	rows, err := s.loadDailyUsageRowsFrom(ctx, store, f, false, false, arena)
 	if err != nil {
 		return nil,
 			fmt.Errorf("querying top sessions: %w", err)
@@ -4334,7 +4338,9 @@ func (db *DB) getUsageSessionCountsLegacy(
 func (s *BunStore) GetUsageSessionCounts(
 	ctx context.Context, f UsageFilter,
 ) (UsageSessionCounts, error) {
-	rows, err := s.loadDailyUsageRows(ctx, f, false, false)
+	arena := usageReadArenaPool.Get().(*usageReadArena)
+	defer arena.release()
+	rows, err := s.loadDailyUsageRows(ctx, f, false, false, arena)
 	if err != nil {
 		return UsageSessionCounts{},
 			fmt.Errorf("querying session counts: %w", err)
@@ -4463,7 +4469,9 @@ func (db *DB) getUsageMatchingSessionCountLegacy(
 func (s *BunStore) GetUsageMatchingSessionCount(
 	ctx context.Context, f UsageFilter,
 ) (int, error) {
-	rows, err := s.loadDailyUsageRows(ctx, f, false, true)
+	arena := usageReadArenaPool.Get().(*usageReadArena)
+	defer arena.release()
+	rows, err := s.loadDailyUsageRows(ctx, f, false, true, arena)
 	if err != nil {
 		return 0, fmt.Errorf("querying matching usage sessions: %w", err)
 	}
