@@ -18085,9 +18085,9 @@ func (e *Engine) buildSessionBatchWriteContext(
 	snapshotProject := pw.sess.Project
 	return db.SessionBatchWrite{
 		ToolResultImages: &e.toolResultImages,
-		Session:     session,
-		Messages:    messages,
-		UsageEvents: usageEvents,
+		Session:          session,
+		Messages:         messages,
+		UsageEvents:      usageEvents,
 		IdentityObservation: identityObservationOrZero(
 			e.projectIdentityObservationForWrite(pw, session),
 		),

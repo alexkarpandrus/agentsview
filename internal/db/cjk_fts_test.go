@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 )
 
 func TestContainsCJK(t *testing.T) {
@@ -421,7 +422,7 @@ func TestCJKFTSForeignFingerprintDefersMaintenance(t *testing.T) {
 	assert.False(t, d.HasCJKFTS())
 	assert.Equal(t, 1, strings.Count(output.String(), "CJK FTS unavailable or stale"))
 
-	require.NoError(t, d.Update(func(tx *sql.Tx) error {
+	require.NoError(t, d.Update(func(tx bun.Tx) error {
 		if _, err := tx.Exec(
 			"UPDATE messages SET content = ? WHERE session_id = ?",
 			"跨版本写入的新中文内容。", "foreign-runtime",
