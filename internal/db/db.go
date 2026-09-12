@@ -4390,7 +4390,7 @@ func openAndInit(
 		return nil, err
 	}
 	db.mu.Lock()
-	err = migrateRecallReviewStateConstraintLocked(db.getWriter())
+	err = migrateRecallReviewStateConstraintLocked(ctx, db.getWriter())
 	db.mu.Unlock()
 	if err != nil {
 		_ = db.CloseContext(ctx)
