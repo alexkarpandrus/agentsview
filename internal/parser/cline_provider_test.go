@@ -268,6 +268,12 @@ func TestClineFindFile_Teammates(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, metaPath, match.Path)
 
+	// Stable digest suffix (__rid-<digest>) also resolves to parent
+	ridID := "sess-find-1__teammate__scout__rid-abcdef0123456789abcdef0123456789"
+	match, ok = clineFindFile(root, ridID)
+	require.True(t, ok)
+	assert.Equal(t, metaPath, match.Path)
+
 	// Looking up raw teammate session ID resolves to the parent session metadata file
 	rawTeammateID := "sess-find-1__teamtask__scout__t1"
 	match, ok = clineFindFile(root, rawTeammateID)
@@ -280,6 +286,9 @@ func TestClineFindFile_Teammates(t *testing.T) {
 		"sess-find-1/evil__teammate__scout",
 		"sess-find-1\\evil__teammate__scout",
 		"_hidden__teammate__scout",
+		"sess-find-1__teammate__scout__rid-../evil",
+		"sess-find-1__teammate__scout__rid-foo/bar",
+		"sess-find-1__teammate__scout__rid-foo\\bar",
 	} {
 		_, ok := clineFindFile(root, hostile)
 		assert.False(t, ok, "expected %q to be rejected", hostile)

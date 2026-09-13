@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"os"
@@ -11,6 +13,34 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/money"
 )
+
+// clineRIDDigestForTest recomputes the stable chain-root digest the parser
+// derives from a raw session ID, so tests assert the exact normative rule
+// (rid-<first 32 hex of SHA-256>) rather than a hard-coded snapshot.
+func clineRIDDigestForTest(t *testing.T, rawSessionID string) string {
+	t.Helper()
+	h := sha256.New()
+	_, err := h.Write([]byte(rawSessionID))
+	require.NoError(t, err)
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+// clineTeammateResultBySource returns the index lookup for a teammate result by
+// its raw source session ID, so tests assert identity by source identity,
+// never by result index (winners sort by content authority, chains are ordered
+// by root identity).
+func clineTeammateResultBySource(
+	results []ParseResult,
+) func(string) (int, bool) {
+	bySource := make(map[string]int)
+	for i := 1; i < len(results); i++ {
+		bySource[results[i].Session.SourceSessionID] = i
+	}
+	return func(sourceSessionID string) (int, bool) {
+		i, ok := bySource[sourceSessionID]
+		return i, ok
+	}
+}
 
 func TestCleanClinePrompt(t *testing.T) {
 	tests := []struct {
@@ -1334,7 +1364,7 @@ func TestParseClineSession_TeammateSubagents(t *testing.T) {
 	metaPath := filepath.Join(sessDir, "sess-parent.json")
 
 	// 1. Test parseClineSessionWithTeammates directly
-	results, err := parseClineSessionWithTeammates(metaPath, "teamproject", "local")
+	results, err := parseClineSessionWithTeammates(metaPath, "teamproject", "local", nil)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 
@@ -1496,7 +1526,7 @@ func TestParseClineTeammates_ContinuationCoalescing(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "path-guard__8saA60.messages.json"), []byte(newerJSON), 0o644))
 
-	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-cont.json"), "proj", "local")
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-cont.json"), "proj", "local", nil)
 	require.NoError(t, err)
 	// 1 parent + 1 subagent (coalesced from 2 files)
 	require.Len(t, results, 2)
@@ -1543,7 +1573,7 @@ func TestParseClineTeammates_IdenticalSnapshots(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "scout__s1.messages.json"), []byte(snap1), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "scout__s2.messages.json"), []byte(snap2), 0o644))
 
-	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-ident.json"), "proj", "local")
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-ident.json"), "proj", "local", nil)
 	require.NoError(t, err)
 	// Exactly 1 subagent session produced
 	require.Len(t, results, 2)
@@ -1585,13 +1615,23 @@ func TestParseClineTeammates_DistinctRunsAndForks(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "worker__r1.messages.json"), []byte(run1), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "worker__r2.messages.json"), []byte(run2), 0o644))
 
-	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-runs.json"), "proj", "local")
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-runs.json"), "proj", "local", nil)
 	require.NoError(t, err)
 	// 1 parent + 2 distinct subagent runs
 	require.Len(t, results, 3)
 
-	assert.Equal(t, "cline:sess-runs__teammate__worker", results[1].Session.ID)
-	assert.Equal(t, "cline:sess-runs__teammate__worker__run2", results[2].Session.ID)
+	// Identity derives from the chain root, not the winner ranking: run r1
+	// sorts behind run r2 (later updatedAt) yet owns the bare form as the
+	// oldest chain, while run r2 gets the stable root-derived suffix.
+	bySource := clineTeammateResultBySource(results)
+	r1Idx, foundR1 := bySource("sess-runs__teamtask__worker__r1")
+	require.True(t, foundR1, "run r1 must be emitted")
+	assert.Equal(t, "cline:sess-runs__teammate__worker", results[r1Idx].Session.ID)
+	r2Idx, foundR2 := bySource("sess-runs__teamtask__worker__r2")
+	require.True(t, foundR2, "run r2 must be emitted")
+	assert.Equal(t,
+		"cline:sess-runs__teammate__worker__rid-"+clineRIDDigestForTest(t, "sess-runs__teamtask__worker__r2"),
+		results[r2Idx].Session.ID)
 }
 
 func TestParseClineTeammates_DivergentTailFork(t *testing.T) {
@@ -1628,12 +1668,23 @@ func TestParseClineTeammates_DivergentTailFork(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "analyst__fa.messages.json"), []byte(forkA), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "analyst__fb.messages.json"), []byte(forkB), 0o644))
 
-	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-fork.json"), "proj", "local")
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-fork.json"), "proj", "local", nil)
 	require.NoError(t, err)
 	// Divergent tails are preserved as distinct runs rather than dropping data
 	require.Len(t, results, 3)
-	assert.Equal(t, "cline:sess-fork__teammate__analyst", results[1].Session.ID)
-	assert.Equal(t, "cline:sess-fork__teammate__analyst__run2", results[2].Session.ID)
+
+	// Each fork roots its own chain, so each gets a stable root-derived ID:
+	// fork fa owns the bare form (lexicographically smallest root session ID)
+	// and fork fb gets the stable digest suffix.
+	bySource := clineTeammateResultBySource(results)
+	forkAIdx, foundA := bySource("sess-fork__teamtask__analyst__fa")
+	require.True(t, foundA, "fork fa must be emitted")
+	assert.Equal(t, "cline:sess-fork__teammate__analyst", results[forkAIdx].Session.ID)
+	forkBIdx, foundB := bySource("sess-fork__teamtask__analyst__fb")
+	require.True(t, foundB, "fork fb must be emitted")
+	assert.Equal(t,
+		"cline:sess-fork__teammate__analyst__rid-"+clineRIDDigestForTest(t, "sess-fork__teamtask__analyst__fb"),
+		results[forkBIdx].Session.ID)
 }
 
 func TestParseClineTeammates_SafetyValidationAndSymlinks(t *testing.T) {
@@ -1671,7 +1722,7 @@ func TestParseClineTeammates_SafetyValidationAndSymlinks(t *testing.T) {
 		defer os.Remove(symlinkPath)
 	}
 
-	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-safe.json"), "proj", "local")
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-safe.json"), "proj", "local", nil)
 	require.NoError(t, err)
 
 	// Only parent + the one valid subagent should be returned. All invalid names and symlinks skipped.
@@ -1708,7 +1759,7 @@ func TestParseClineTeammates_EmptyFileSuperseded(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "worker__e1.messages.json"), []byte(emptyJSON), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "worker__e2.messages.json"), []byte(nonEmptyJSON), 0o644))
 
-	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-empty.json"), "proj", "local")
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-empty.json"), "proj", "local", nil)
 	require.NoError(t, err)
 	// Exactly 1 subagent session (non-empty supersedes empty)
 	require.Len(t, results, 2)
@@ -1824,4 +1875,161 @@ func TestParseClineSession_MultiTurnUserInputCleaning(t *testing.T) {
 	assert.Equal(t, RoleAssistant, msgs[4].Role)
 	assert.Equal(t, 4, msgs[4].Ordinal)
 	assert.Equal(t, "Proceeding with execution.", msgs[4].Content)
+}
+
+func TestParseClineTeammates_StoredHintsAndRootDisappearance(t *testing.T) {
+	dir := t.TempDir()
+	sessDir := filepath.Join(dir, "sess-hints")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+
+	metaJSON := `{"session_id": "sess-hints", "cwd": "/workspace"}`
+	metaPath := filepath.Join(sessDir, "sess-hints.json")
+	require.NoError(t, os.WriteFile(metaPath, []byte(metaJSON), 0o644))
+
+	// 1. Two distinct runs produce IDs A (bare) and B (rid).
+	run1JSON := `{
+		"version": 1,
+		"sessionId": "sess-hints__teamtask__worker__r1",
+		"origin": {"subagent": "worker"},
+		"messages": [{"id": "m1_1", "role": "user", "content": [{"type": "text", "text": "task 1"}], "ts": 1000}]
+	}`
+	run2JSON := `{
+		"version": 1,
+		"sessionId": "sess-hints__teamtask__worker__r2",
+		"origin": {"subagent": "worker"},
+		"messages": [{"id": "m2_1", "role": "user", "content": [{"type": "text", "text": "task 2"}], "ts": 2000}]
+	}`
+	r1Path := filepath.Join(sessDir, "worker__r1.messages.json")
+	r2Path := filepath.Join(sessDir, "worker__r2.messages.json")
+	require.NoError(t, os.WriteFile(r1Path, []byte(run1JSON), 0o644))
+	require.NoError(t, os.WriteFile(r2Path, []byte(run2JSON), 0o644))
+
+	resInitial, err := parseClineSessionWithTeammates(metaPath, "proj", "local", nil)
+	require.NoError(t, err)
+	require.Len(t, resInitial, 3)
+
+	bySource := clineTeammateResultBySource(resInitial)
+	idx1, found1 := bySource("sess-hints__teamtask__worker__r1")
+	require.True(t, found1)
+	idA := resInitial[idx1].Session.ID
+	assert.Equal(t, "cline:sess-hints__teammate__worker", idA)
+
+	idx2, found2 := bySource("sess-hints__teamtask__worker__r2")
+	require.True(t, found2)
+	idB := resInitial[idx2].Session.ID
+	assert.Equal(t, "cline:sess-hints__teammate__worker__rid-"+clineRIDDigestForTest(t, "sess-hints__teamtask__worker__r2"), idB)
+
+	// Phase 2: Add a third run that sorts first (lexicographically smaller rawSessionID: r0).
+	// With stored hints for r1 and r2, idA and idB remain unchanged; r0 gets a new rid-derived ID.
+	run0JSON := `{
+		"version": 1,
+		"sessionId": "sess-hints__teamtask__worker__r0",
+		"origin": {"subagent": "worker"},
+		"messages": [{"id": "m0_1", "role": "user", "content": [{"type": "text", "text": "task 0"}], "ts": 500}]
+	}`
+	r0Path := filepath.Join(sessDir, "worker__r0.messages.json")
+	require.NoError(t, os.WriteFile(r0Path, []byte(run0JSON), 0o644))
+
+	hints := map[string]string{
+		r1Path: idA,
+		r2Path: idB,
+	}
+	resWithRun0, err := parseClineSessionWithTeammates(metaPath, "proj", "local", hints)
+	require.NoError(t, err)
+	require.Len(t, resWithRun0, 4)
+
+	bySource = clineTeammateResultBySource(resWithRun0)
+	idx1After, found1After := bySource("sess-hints__teamtask__worker__r1")
+	require.True(t, found1After)
+	assert.Equal(t, idA, resWithRun0[idx1After].Session.ID, "idA must remain unchanged when r0 is added")
+
+	idx2After, found2After := bySource("sess-hints__teamtask__worker__r2")
+	require.True(t, found2After)
+	assert.Equal(t, idB, resWithRun0[idx2After].Session.ID, "idB must remain unchanged when r0 is added")
+
+	idx0After, found0After := bySource("sess-hints__teamtask__worker__r0")
+	require.True(t, found0After)
+	assert.Equal(t,
+		"cline:sess-hints__teammate__worker__rid-"+clineRIDDigestForTest(t, "sess-hints__teamtask__worker__r0"),
+		resWithRun0[idx0After].Session.ID)
+
+	// Phase 3: Root-file disappearance while continuation remains.
+	contDir := filepath.Join(dir, "sess-root-disappear")
+	require.NoError(t, os.MkdirAll(contDir, 0o755))
+	contMetaPath := filepath.Join(contDir, "sess-root-disappear.json")
+	require.NoError(t, os.WriteFile(contMetaPath, []byte(`{"session_id": "sess-root-disappear", "cwd": "/workspace"}`), 0o644))
+
+	// Chain 1: root1 + next1
+	root1JSON := `{
+		"version": 1,
+		"sessionId": "sess-root-disappear__teamtask__scout__a_root",
+		"origin": {"subagent": "scout"},
+		"messages": [{"id": "cm1", "role": "user", "content": [{"type": "text", "text": "start"}], "ts": 1000}]
+	}`
+	next1JSON := `{
+		"version": 1,
+		"sessionId": "sess-root-disappear__teamtask__scout__z_next",
+		"origin": {"subagent": "scout"},
+		"messages": [
+			{"id": "cm1", "role": "user", "content": [{"type": "text", "text": "start"}], "ts": 1000},
+			{"id": "cm2", "role": "assistant", "content": [{"type": "text", "text": "more"}], "ts": 1100}
+		]
+	}`
+	// Chain 2: independent run 2
+	runBJSON := `{
+		"version": 1,
+		"sessionId": "sess-root-disappear__teamtask__scout__m_other",
+		"origin": {"subagent": "scout"},
+		"messages": [{"id": "bm1", "role": "user", "content": [{"type": "text", "text": "other"}], "ts": 1050}]
+	}`
+	root1Path := filepath.Join(contDir, "scout__a_root.messages.json")
+	next1Path := filepath.Join(contDir, "scout__z_next.messages.json")
+	runBPath := filepath.Join(contDir, "scout__m_other.messages.json")
+	require.NoError(t, os.WriteFile(root1Path, []byte(root1JSON), 0o644))
+	require.NoError(t, os.WriteFile(next1Path, []byte(next1JSON), 0o644))
+	require.NoError(t, os.WriteFile(runBPath, []byte(runBJSON), 0o644))
+
+	// Before disappearance:
+	// Chain 1 root (a_root) sorts before Chain 2 (m_other).
+	// So Chain 1 gets bare form ("...__teammate__scout"), Chain 2 gets rid suffix.
+	resContInit, err := parseClineSessionWithTeammates(contMetaPath, "proj", "local", nil)
+	require.NoError(t, err)
+	require.Len(t, resContInit, 3)
+	bySrcCont := clineTeammateResultBySource(resContInit)
+	c1Idx, _ := bySrcCont("sess-root-disappear__teamtask__scout__z_next")
+	assert.Equal(t, "cline:sess-root-disappear__teammate__scout", resContInit[c1Idx].Session.ID)
+
+	// Now remove root1 file (scout__a_root), leaving next1 and m_other.
+	require.NoError(t, os.Remove(root1Path))
+
+	// Case 4A: With exact stored hint for next1Path, existing ID is preserved!
+	resWithHint, err := parseClineSessionWithTeammates(contMetaPath, "proj", "local", map[string]string{
+		next1Path: "cline:sess-root-disappear__teammate__scout",
+	})
+	require.NoError(t, err)
+	require.Len(t, resWithHint, 3)
+	bySrcWithHint := clineTeammateResultBySource(resWithHint)
+	c1WithHintIdx, _ := bySrcWithHint("sess-root-disappear__teamtask__scout__z_next")
+	assert.Equal(t, "cline:sess-root-disappear__teammate__scout", resWithHint[c1WithHintIdx].Session.ID)
+
+	// Case 4B: Without reachable hint:
+	// m_other sorts before z_next, so m_other takes bare form, and z_next falls back to new root-derived ID.
+	resWithoutHint, err := parseClineSessionWithTeammates(contMetaPath, "proj", "local", nil)
+	require.NoError(t, err)
+	require.Len(t, resWithoutHint, 3)
+	bySrcNoHint := clineTeammateResultBySource(resWithoutHint)
+	c1NoHintIdx, _ := bySrcNoHint("sess-root-disappear__teamtask__scout__z_next")
+	assert.Equal(t,
+		"cline:sess-root-disappear__teammate__scout__rid-"+clineRIDDigestForTest(t, "sess-root-disappear__teamtask__scout__z_next"),
+		resWithoutHint[c1NoHintIdx].Session.ID)
+
+	// Legacy __run2 hint is ignored and not reused
+	resLegacy, err := parseClineSessionWithTeammates(contMetaPath, "proj", "local", map[string]string{
+		next1Path: "cline:sess-root-disappear__teammate__scout__run2",
+	})
+	require.NoError(t, err)
+	require.Len(t, resLegacy, 3)
+	bySrcLegacy := clineTeammateResultBySource(resLegacy)
+	c1LegacyIdx, _ := bySrcLegacy("sess-root-disappear__teamtask__scout__z_next")
+	assert.NotEqual(t, "cline:sess-root-disappear__teammate__scout__run2", resLegacy[c1LegacyIdx].Session.ID)
 }

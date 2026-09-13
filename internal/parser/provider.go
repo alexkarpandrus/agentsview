@@ -970,6 +970,16 @@ type ParseRequest struct {
 	// StoredPathResolver maps a canonical remote companion path back to the
 	// materialized file used by this parse.
 	StoredPathResolver func(string) (string, bool)
+	// StoredSessionIDHints maps a stored source file path to the full session
+	// ID that one active archive row owns. It is populated only for
+	// authoritative Cline session-directory parses from active rows under the
+	// session-directory ownership scope, and only when exactly one active row
+	// owns the exact path. Providers treat it as an advisory identity hint:
+	// non-positional values are authoritative while legacy positional __runN
+	// values are ignored so those rows migrate through the source-missing
+	// reconciliation path. No database access happens in parser code; the
+	// engine builds the map before parsing.
+	StoredSessionIDHints map[string]string
 }
 
 // ParseOutcome is the full-parse provider output. It is meaningful only when

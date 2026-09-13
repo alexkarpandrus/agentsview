@@ -153,7 +153,7 @@ func parseClineSession(
 	projectHint string,
 	machine string,
 ) (*ParsedSession, []ParsedMessage, error) {
-	results, err := parseClineSessionWithTeammates(metaPath, projectHint, machine)
+	results, err := parseClineSessionWithTeammates(metaPath, projectHint, machine, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -164,11 +164,15 @@ func parseClineSession(
 }
 
 // parseClineSessionWithTeammates parses a Cline session and any sibling teammate
-// subagent transcripts into ParseResults.
+// subagent transcripts into ParseResults. storedSessionIDHints maps the exact
+// stored path of each teammate transcript (or the session metadata path) to the
+// full session ID an active archive row owns; the parser reuses non-positional
+// values and ignores legacy positional __runN values.
 func parseClineSessionWithTeammates(
 	metaPath string,
 	projectHint string,
 	machine string,
+	storedSessionIDHints map[string]string,
 ) ([]ParseResult, error) {
 	metaData, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -397,7 +401,7 @@ func parseClineSessionWithTeammates(
 		sess.UsageEvents = []ParsedUsageEvent{event}
 	}
 
-	teammates, agentMap, err := parseClineTeammates(sessionDir, canonicalID, sess, model, provider)
+	teammates, agentMap, err := parseClineTeammates(sessionDir, canonicalID, sess, model, provider, storedSessionIDHints)
 	if err != nil {
 		return nil, fmt.Errorf("parsing cline teammates: %w", err)
 	}
@@ -712,6 +716,9 @@ type clineTeammateCandidate struct {
 // 3. Later updated_at timestamp
 // 4. Later file mtime
 // 5. Lexicographical filename tiebreaker (deterministic)
+//
+// Winner ranking stays the sole authority for choosing which content file is
+// emitted; identity is decided separately by the chain root below.
 func isBetterTeammateCandidate(a, b *clineTeammateCandidate) bool {
 	if len(a.msgIDs) != len(b.msgIDs) {
 		return len(a.msgIDs) > len(b.msgIDs)
@@ -728,16 +735,164 @@ func isBetterTeammateCandidate(a, b *clineTeammateCandidate) bool {
 	return a.filename > b.filename
 }
 
+// clineChainRec groups one emitted winner with the candidate that roots its
+// message-ID prefix lineage. Identity derives from the root, never from the
+// winner's content rank, so a new run that sorts ahead cannot rename an
+// established chain.
+type clineChainRec struct {
+	winner    *clineTeammateCandidate
+	preferred *clineTeammateCandidate
+	root      *clineTeammateCandidate
+}
+
+// clineChainRootLess orders candidates as chain roots: ascending message-ID
+// prefix length, then lexicographic rawSessionID, then filename. Timestamps,
+// mtime, map order, and winner rank never participate, so identity is stable
+// across sync passes and independent of content ranking.
+func clineChainRootLess(a, b *clineTeammateCandidate) bool {
+	if len(a.msgIDs) != len(b.msgIDs) {
+		return len(a.msgIDs) < len(b.msgIDs)
+	}
+	if a.rawSessionID != b.rawSessionID {
+		return a.rawSessionID < b.rawSessionID
+	}
+	if a.filename != b.filename {
+		return a.filename < b.filename
+	}
+	return false
+}
+
+// clinePreferredChainRoot returns the shortest message-ID prefix candidate that
+// winner extends (the winner itself when no other candidate prefixes it).
+func clinePreferredChainRoot(
+	winner *clineTeammateCandidate,
+	cands []*clineTeammateCandidate,
+) *clineTeammateCandidate {
+	best := winner
+	for _, cand := range cands {
+		if cand == winner || len(cand.msgIDs) == 0 {
+			continue
+		}
+		if len(cand.msgIDs) > len(winner.msgIDs) {
+			continue
+		}
+		if !isMessagePrefixSuperset(cand.msgIDs, winner.msgIDs) {
+			continue
+		}
+		if clineChainRootLess(cand, best) {
+			best = cand
+		}
+	}
+	return best
+}
+
+// clineClaimedChainRoot picks the winner's chain root from the candidates that
+// prefix it, honoring deterministic root claiming so two divergent forks never
+// claim one shared root candidate (which would collide their rid suffixes).
+// The winner itself is the last-resort root.
+func clineClaimedChainRoot(
+	winner *clineTeammateCandidate,
+	cands []*clineTeammateCandidate,
+	claimed map[*clineTeammateCandidate]bool,
+) *clineTeammateCandidate {
+	best := winner
+	bestEligible := false
+	for _, cand := range cands {
+		if len(cand.msgIDs) == 0 || len(cand.msgIDs) > len(winner.msgIDs) {
+			continue
+		}
+		if !isMessagePrefixSuperset(cand.msgIDs, winner.msgIDs) {
+			continue
+		}
+		if claimed[cand] {
+			continue
+		}
+		if !bestEligible || clineChainRootLess(cand, best) {
+			best = cand
+			bestEligible = true
+		}
+	}
+	if bestEligible {
+		return best
+	}
+	return winner
+}
+
+// clineLegacyRunSessionID reports whether id is a legacy positional teammate
+// ID (<parent>__teammate__<subagent>__run<number>). Positional IDs are never
+// reused: they migrate through the source-missing reconciliation instead.
+func clineLegacyRunSessionID(id string) bool {
+	parts := strings.Split(id, "__")
+	if len(parts) < 4 {
+		return false
+	}
+	last := parts[len(parts)-1]
+	if !strings.HasPrefix(last, "run") {
+		return false
+	}
+	suffix := strings.TrimPrefix(last, "run")
+	if suffix == "" {
+		return false
+	}
+	if _, err := strconv.ParseInt(suffix, 10, 64); err != nil {
+		return false
+	}
+	return true
+}
+
+// clineRIDDigest returns the first 32 hexadecimal characters of SHA-256 over
+// raw, the stable content identity for one chain root. The digest never embeds
+// the raw session ID, so it cannot introduce __ delimiters or other unsafe
+// characters into the emitted session ID.
+func clineRIDDigest(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	h := sha256.New()
+	if _, err := h.Write([]byte(raw)); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))[:32]
+}
+
+// clineDerivedChainID derives the stable non-positional ID for a chain that
+// must be disambiguated from the (parent, subagent) bare form:
+// <parent>__teammate__<subagent>__rid-<digest>. The suffix passes the same
+// safety validation as teammate names. When the root cannot produce a safe
+// identity the chain falls back to the legacy per-file form
+// <parent>__teamtask__<file-base> and is never coalesced with another
+// candidate (the filename base is already validated by IsClineTeammateMessagesFile).
+func clineDerivedChainID(
+	rec *clineChainRec,
+	parentSessionID, subagent string,
+) string {
+	bareID := parentSessionID + "__teammate__" + subagent
+	if rec.root == nil {
+		return bareID
+	}
+	suffix := "rid-" + clineRIDDigest(rec.root.rawSessionID)
+	if strings.HasPrefix(suffix, "rid-") &&
+		isValidClineTeammateSubagentName(suffix) {
+		return bareID + "__" + suffix
+	}
+	fileBase := strings.TrimSuffix(rec.winner.filename, ".messages.json")
+	return parentSessionID + "__teamtask__" + fileBase
+}
+
 // parseClineTeammates discovers and parses teammate subagent transcripts under sessionDir.
 // Continuations of the same subagent (sharing an exact message ID prefix) are coalesced
 // into a single authoritative session under a stable ID (cline:<parent>__teammate__<subagent>),
 // while distinct runs (e.g. non-continuation restarts) remain separate sessions.
+// storedSessionIDHints maps the exact stored path of each teammate transcript to the
+// full session ID an active archive row owns; non-positional values are authoritative
+// and legacy positional __runN values are ignored.
 func parseClineTeammates(
 	sessionDir string,
 	parentSessionID string,
 	parentSess *ParsedSession,
 	parentModel string,
 	parentProvider string,
+	storedSessionIDHints map[string]string,
 ) ([]ParseResult, map[string]string, error) {
 	entries, err := os.ReadDir(sessionDir)
 	if err != nil {
@@ -878,12 +1033,93 @@ func parseClineTeammates(
 			}
 		}
 
-		for runIdx, winner := range winners {
-			stableID := parentSessionID + "__teammate__" + sa
-			if runIdx > 0 {
-				stableID = parentSessionID + "__teammate__" + sa + "__run" + strconv.Itoa(runIdx+1)
+		// Identity is resolved per chain AFTER winner selection: the chain root
+		// is the candidate with the shortest message-ID prefix the winner
+		// extends, and the emitted ID derives from that root, never from winner
+		// rank, updatedAt, mtime, map order, or result order. Stored exact-path
+		// hints make existing non-positional IDs authoritative so a new run
+		// that sorts ahead cannot rename an established chain.
+		chainRecs := make([]*clineChainRec, 0, len(winners))
+		for _, winner := range winners {
+			chainRecs = append(chainRecs, &clineChainRec{
+				winner:    winner,
+				preferred: clinePreferredChainRoot(winner, cands),
+			})
+		}
+		// Deterministic claim order (preferred root, then winner identity) so
+		// divergent forks never claim one shared root candidate.
+		sort.SliceStable(chainRecs, func(i, j int) bool {
+			a := chainRecs[i].preferred
+			b := chainRecs[j].preferred
+			if a != b {
+				if clineChainRootLess(a, b) {
+					return true
+				}
+				if clineChainRootLess(b, a) {
+					return false
+				}
 			}
-			fullSessionID := string(AgentCline) + ":" + stableID
+			a = chainRecs[i].winner
+			b = chainRecs[j].winner
+			if a != b {
+				if clineChainRootLess(a, b) {
+					return true
+				}
+				if clineChainRootLess(b, a) {
+					return false
+				}
+			}
+			return false
+		})
+		claimed := make(map[*clineTeammateCandidate]bool)
+		for _, rec := range chainRecs {
+			rec.root = clineClaimedChainRoot(rec.winner, cands, claimed)
+			claimed[rec.root] = true
+		}
+		// Deterministic chain order by root identity for bare-form ownership.
+		sort.SliceStable(chainRecs, func(i, j int) bool {
+			return clineChainRootLess(chainRecs[i].root, chainRecs[j].root)
+		})
+
+		bareID := parentSessionID + "__teammate__" + sa
+		idByWinner := make(map[*clineTeammateCandidate]string)
+		usedBare := false
+		// Authoritative stored exact-path hints first: an existing persisted
+		// non-positional ID must not be reassigned, even when a new run sorts
+		// ahead. Legacy positional __runN IDs are ignored.
+		for _, rec := range chainRecs {
+			if hint, ok := storedSessionIDHints[rec.winner.path]; ok {
+				rawHint := strings.TrimPrefix(hint, string(AgentCline)+":")
+				if !clineLegacyRunSessionID(rawHint) {
+					idByWinner[rec.winner] = rawHint
+					if rawHint == bareID {
+						usedBare = true
+					}
+				}
+			}
+		}
+		for _, rec := range chainRecs {
+			if _, ok := idByWinner[rec.winner]; ok {
+				continue
+			}
+			if !usedBare {
+				idByWinner[rec.winner] = bareID
+				usedBare = true
+			} else {
+				idByWinner[rec.winner] = clineDerivedChainID(
+					rec, parentSessionID, sa,
+				)
+			}
+		}
+		if len(winners) > 0 {
+			// Preferred winner, not first emitted: the subagent's tool binding
+			// targets the most authoritative content file even when chain
+			// ordering or a new run puts a different file first.
+			agentMap[sa] = string(AgentCline) + ":" + idByWinner[winners[0]]
+		}
+
+		for _, winner := range winners {
+			fullSessionID := string(AgentCline) + ":" + idByWinner[winner]
 
 			parsedMessages, peakCtx, maxTS := parseClineRawMessages(winner.rawFile.Messages, parentModel, parentProvider)
 
@@ -965,10 +1201,6 @@ func parseClineTeammates(
 				subSess.PeakContextTokens = peakCtx
 				subSess.HasPeakContextTokens = true
 				subSess.aggregateTokenPresenceKnown = true
-			}
-
-			if runIdx == 0 {
-				agentMap[sa] = fullSessionID
 			}
 
 			teammates = append(teammates, ParseResult{

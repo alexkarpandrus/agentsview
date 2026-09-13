@@ -35,6 +35,7 @@ func newClineProviderFactory(def AgentDef) ProviderFactory {
 				WithFileFingerprint(func(src singleFileSource) (SourceFingerprint, error) {
 					return clineFingerprintSource(src.Path)
 				}),
+				WithFileStoredSourceHintScope(clineStoredSourceHintScope),
 				WithFileParse(func(src singleFileSource, req ParseRequest) ([]ParseResult, []string, error) {
 					return clineParseFile(src, req)
 				}),
@@ -168,6 +169,26 @@ func clineClassifyPath(
 	return singleFileMatch{}, false
 }
 
+// clineStoredSourceHintScope is the single-file stored-source-hint-scope hook
+// for Cline: for any changed metadata or teammate transcript path, classify
+// the path (allowing missing tombstone paths), resolve the owning session
+// directory, and return it as the complete-result ownership scope. Teammate
+// paths are ordinary descendants of the session directory, not path#member
+// virtual paths, so IncludeVirtualMembers stays false.
+func clineStoredSourceHintScope(root, path string) (StoredSourceHintScope, bool) {
+	match, ok := clineClassifyPath(root, path, true)
+	if !ok {
+		return StoredSourceHintScope{}, false
+	}
+	return StoredSourceHintScope{
+		Path:                  filepath.Dir(filepath.Clean(match.Path)),
+		IncludeVirtualMembers: false,
+	}, true
+}
+
+// clineFindFile resolves a Cline raw session ID (parent, __teamtask__ teammate,
+// __teammate__ stable, __teammate__<subagent>__rid-<digest>, or legacy
+// __run<number>) back to the owning session metadata file.
 func clineFindFile(root, rawID string) (singleFileMatch, bool) {
 	if !isSafeSinglePathComponent(rawID) {
 		return singleFileMatch{}, false
@@ -196,7 +217,7 @@ func clineParseFile(
 	src singleFileSource, req ParseRequest,
 ) ([]ParseResult, []string, error) {
 	results, err := parseClineSessionWithTeammates(
-		src.Path, req.Source.ProjectHint, req.Machine,
+		src.Path, req.Source.ProjectHint, req.Machine, req.StoredSessionIDHints,
 	)
 	if err != nil {
 		return nil, nil, err

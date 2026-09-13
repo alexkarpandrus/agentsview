@@ -1263,6 +1263,14 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
   `<mode_notice>` blocks upon mode switching. Agentsview strips these wrapper
   and notice tags across all turns so operator prompts and session names remain
   clean human text and empty approvals do not persist empty bubbles.
+  Teammate subagents reside in
+  `<sessionDir>/<subagent>__<taskSuffix>.messages.json`. Continuations are
+  coalesced by prefix into stable non-positional IDs derived from the chain root
+  (`<parent>__teammate__<subagent>` for the oldest chain and
+  `<parent>__teammate__<subagent>__rid-<digest>` for subsequent chains), using
+  exact stored-path hints to preserve established IDs when earlier runs sort
+  ahead. Deleted teammate transcripts are tombstoned via complete-source
+  ownership reconciliation without hard-deleting active rows.
 
 ## OpenHands (`openhands`)
 
