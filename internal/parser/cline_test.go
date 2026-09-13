@@ -843,6 +843,54 @@ func TestParseClineSession_ThinkingAndToolSeparated(t *testing.T) {
 	assert.Equal(t, "run_commands", messages[2].ToolCalls[0].ToolName)
 }
 
+func TestParseClineRawMessagesToolResultSurvivesMessageSliceGrowth(t *testing.T) {
+	raw := []clineRawMessage{
+		{
+			ID:   "assistant-1",
+			Role: "assistant",
+			Content: []clineRawBlock{
+				{Type: "thinking", Thinking: "planning"},
+				{Type: "tool_use", ID: "call-1", Name: "run_commands", Input: jsontext.Value(`{"command":"one"}`)},
+			},
+			Timestamp: 1000,
+		},
+		{
+			ID:   "assistant-2",
+			Role: "assistant",
+			Content: []clineRawBlock{
+				{Type: "thinking", Thinking: "planning again"},
+				{Type: "tool_use", ID: "call-2", Name: "run_commands", Input: jsontext.Value(`{"command":"two"}`)},
+			},
+			Timestamp: 2000,
+		},
+		{
+			ID:        "assistant-3",
+			Role:      "assistant",
+			Content:   []clineRawBlock{{Type: "text", Text: "between"}},
+			Timestamp: 3000,
+		},
+		{
+			ID:   "result-1",
+			Role: "user",
+			Content: []clineRawBlock{{
+				Type:      "tool_result",
+				ToolUseID: "call-1",
+				Content:   jsontext.Value(`"completed output"`),
+			}},
+			Timestamp: 4000,
+		},
+	}
+
+	messages, _, _ := parseClineRawMessages(raw, "", "")
+	require.Len(t, messages, 6)
+	require.Len(t, messages[1].ToolCalls, 1)
+	assert.Equal(t, "call-1", messages[1].ToolCalls[0].ToolUseID)
+	require.Len(t, messages[1].ToolCalls[0].ResultEvents, 1,
+		"the result must resolve against the current parsed message slice")
+	assert.Equal(t, "completed", messages[1].ToolCalls[0].ResultEvents[0].Status)
+	assert.Equal(t, "completed output", messages[1].ToolCalls[0].ResultEvents[0].Content)
+}
+
 func TestParseClineSession_EmptyTranscript(t *testing.T) {
 	dir := t.TempDir()
 	sessionID := "1789000000004_empty"
@@ -1409,6 +1457,53 @@ func TestParseClineSession_TeammateSubagents(t *testing.T) {
 	assert.Equal(t, "cline:sess-parent", sess.ID)
 	assert.Empty(t, msgs[1].ToolCalls[0].SubagentSessionID)
 	assert.Equal(t, "cline:sess-parent__teammate__git-scout", msgs[3].ToolCalls[0].SubagentSessionID)
+}
+
+func TestParseClineSession_AmbiguousTeammateRunsRemainUnlinked(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "sess-ambiguous"
+	sessDir := filepath.Join(dir, sessionID)
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessDir, sessionID+".json"),
+		[]byte(`{"session_id":"sess-ambiguous"}`), 0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessDir, sessionID+".messages.json"),
+		[]byte(`{
+			"messages": [
+				{"id":"parent-run","role":"assistant","content":[{"type":"tool_use","id":"run-worker","name":"team_run_task","input":{"agentId":"worker"}}],"ts":1000},
+				{"id":"parent-result","role":"user","content":[{"type":"tool_result","tool_use_id":"run-worker","content":"done"}],"ts":2000}
+			]
+		}`), 0o644,
+	))
+	for _, tc := range []struct {
+		filename string
+		session  string
+		message  string
+	}{
+		{filename: "worker__first.messages.json", session: "sess-ambiguous__teamtask__worker__first", message: "first"},
+		{filename: "worker__second.messages.json", session: "sess-ambiguous__teamtask__worker__second", message: "second"},
+	} {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(sessDir, tc.filename),
+			[]byte(`{"sessionId":"`+tc.session+`","origin":{"subagent":"worker"},"messages":[{"id":"`+tc.message+`-id","role":"user","content":[{"type":"text","text":"`+tc.message+`"}],"ts":1000}]}`),
+			0o644,
+		))
+	}
+
+	results, err := parseClineSessionWithTeammates(
+		filepath.Join(sessDir, sessionID+".json"), "", "local", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	require.Len(t, results[0].Messages, 2)
+	require.Len(t, results[0].Messages[0].ToolCalls, 1)
+	call := results[0].Messages[0].ToolCalls[0]
+	assert.Empty(t, call.SubagentSessionID)
+	require.Len(t, call.ResultEvents, 1)
+	assert.Empty(t, call.ResultEvents[0].SubagentSessionID)
+	assert.Empty(t, call.ResultEvents[0].AgentID)
 }
 
 func TestParseClineTeammates_ContinuationCoalescing(t *testing.T) {

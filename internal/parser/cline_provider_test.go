@@ -185,6 +185,59 @@ func TestClineFingerprintSource(t *testing.T) {
 	assert.NotEqual(t, fp1.Size, fp2.Size)
 }
 
+func TestClinePrimarySymlinksAreRejected(t *testing.T) {
+	root := t.TempDir()
+	sessionsDir := filepath.Join(root, "data", "sessions")
+	sessionID := "1789000000007_symlink"
+	sessDir := filepath.Join(sessionsDir, sessionID)
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	metaPath := filepath.Join(sessDir, sessionID+".json")
+	msgPath := filepath.Join(sessDir, sessionID+".messages.json")
+	metaTarget := filepath.Join(t.TempDir(), "metadata.json")
+	msgTarget := filepath.Join(t.TempDir(), "messages.json")
+	require.NoError(t, os.WriteFile(metaTarget, []byte(`{"session_id":"`+sessionID+`"}`), 0o644))
+	require.NoError(t, os.WriteFile(msgTarget, []byte(`{"messages":[]}`), 0o644))
+	require.NoError(t, os.WriteFile(metaPath, []byte(`{"session_id":"`+sessionID+`"}`), 0o644))
+
+	t.Run("messages symlink", func(t *testing.T) {
+		symlinkOrSkip(t, msgTarget, msgPath)
+		provider, ok := NewProvider(AgentCline, ProviderConfig{Roots: []string{root}})
+		require.True(t, ok)
+		paths, err := clineDiscoverPaths(t, provider)
+		require.NoError(t, err)
+		assert.NotContains(t, paths, metaPath)
+		_, err = clineFingerprintSource(metaPath)
+		assert.Error(t, err)
+		require.NoError(t, os.Remove(msgPath))
+	})
+
+	t.Run("metadata symlink", func(t *testing.T) {
+		symlinkOrSkip(t, metaTarget, metaPath)
+		provider, ok := NewProvider(AgentCline, ProviderConfig{Roots: []string{root}})
+		require.True(t, ok)
+		paths, err := clineDiscoverPaths(t, provider)
+		require.NoError(t, err)
+		assert.NotContains(t, paths, metaPath)
+		match, ok := clineClassifyPath(root, metaPath, false)
+		assert.False(t, ok)
+		assert.Empty(t, match)
+		require.NoError(t, os.Remove(metaPath))
+	})
+
+	// A changed symlink path is rejected before it can be mapped to the parent
+	// metadata source, even when the target contains valid JSON.
+	require.NoError(t, os.WriteFile(metaPath, []byte(`{"session_id":"`+sessionID+`"}`), 0o644))
+	symlinkOrSkip(t, msgTarget, msgPath)
+	_, ok := clineClassifyPath(root, msgPath, false)
+	assert.False(t, ok)
+	_, err := clineFingerprintSource(metaPath)
+	assert.Error(t, err)
+	require.NoError(t, os.Remove(msgPath))
+	// Changing the former symlink target must not make the source fingerprint
+	// readable through the link.
+	require.NoError(t, os.WriteFile(msgTarget, []byte(`{"messages":[{"id":"changed"}]}`), 0o644))
+}
+
 func TestClineDiscovery_MissingDataSessions(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "settings"), 0o755))

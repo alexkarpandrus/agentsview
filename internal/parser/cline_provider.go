@@ -103,18 +103,36 @@ func clineDiscoverEach(
 		}
 		sessionID := entry.Name()
 		metaPath := filepath.Join(sessionsDir, sessionID, sessionID+".json")
-		info, err := os.Lstat(metaPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return fmt.Errorf("stat cline session %s: %w", metaPath, err)
+		info, err := clineRegularFileInfo(metaPath, true)
+		if err != nil || info == nil {
+			return nil
 		}
-		if !info.Mode().IsRegular() {
+
+		messagesPath := filepath.Join(
+			filepath.Dir(metaPath), sessionID+".messages.json",
+		)
+		if _, err := clineRegularFileInfo(messagesPath, true); err != nil {
 			return nil
 		}
 		return yield(singleFileMatch{Path: metaPath})
 	})
+}
+
+// clineRegularFileInfo accepts only real regular files. Cline primary files
+// must not be read through symlinks because the target is outside the source
+// fingerprint and could otherwise be archived as an unrelated session.
+func clineRegularFileInfo(path string, allowMissing bool) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) && allowMissing {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("stat %s: source is not a regular file", path)
+	}
+	return info, nil
 }
 
 func clineWatchRoots(roots []string) []WatchRoot {
@@ -158,12 +176,22 @@ func clineClassifyPath(
 	if filename != sessionID+".json" && filename != sessionID+".messages.json" && !IsClineTeammateMessagesFile(sessionID, filename) {
 		return singleFileMatch{}, false
 	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return singleFileMatch{}, false
+		}
+	} else if !os.IsNotExist(err) {
+		return singleFileMatch{}, false
+	}
 
 	metaPath := filepath.Join(sessionsDir, sessionID, sessionID+".json")
 	if allowMissing {
+		if _, err := clineRegularFileInfo(metaPath, true); err != nil {
+			return singleFileMatch{}, false
+		}
 		return singleFileMatch{Path: metaPath}, true
 	}
-	if IsRegularFile(metaPath) {
+	if _, err := clineRegularFileInfo(metaPath, false); err == nil {
 		return singleFileMatch{Path: metaPath}, true
 	}
 	return singleFileMatch{}, false
@@ -228,7 +256,7 @@ func clineFindFile(root, rawID string) (singleFileMatch, bool) {
 	if !isWithinRoot(sessionsDir, metaPath) {
 		return singleFileMatch{}, false
 	}
-	if IsRegularFile(metaPath) {
+	if _, err := clineRegularFileInfo(metaPath, false); err == nil {
 		return singleFileMatch{Path: metaPath}, true
 	}
 	return singleFileMatch{}, false

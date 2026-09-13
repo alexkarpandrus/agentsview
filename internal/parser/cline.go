@@ -174,6 +174,9 @@ func parseClineSessionWithTeammates(
 	machine string,
 	storedSessionIDHints map[string]string,
 ) ([]ParseResult, error) {
+	if _, err := clineRegularFileInfo(metaPath, false); err != nil {
+		return nil, err
+	}
 	metaData, err := os.ReadFile(metaPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading cline metadata: %w", err)
@@ -221,9 +224,18 @@ func parseClineSessionWithTeammates(
 
 	messagesPath := filepath.Join(sessionDir, canonicalID+".messages.json")
 
-	parsedMessages, peakCtx, maxTS, err := parseClineMessages(messagesPath, model, provider)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("parsing cline messages: %w", err)
+	var parsedMessages []ParsedMessage
+	var peakCtx int
+	var maxTS time.Time
+	messagesInfo, err := clineRegularFileInfo(messagesPath, true)
+	if err != nil {
+		return nil, err
+	}
+	if messagesInfo != nil {
+		parsedMessages, peakCtx, maxTS, err = parseClineMessages(messagesPath, model, provider)
+		if err != nil {
+			return nil, fmt.Errorf("parsing cline messages: %w", err)
+		}
 	}
 
 	endedAt := maxTS
@@ -444,6 +456,11 @@ func parseClineMessages(
 	return parsedMessages, peakCtx, maxTS, nil
 }
 
+type clineToolCallLocation struct {
+	messageIndex int
+	toolIndex    int
+}
+
 // parseClineRawMessages parses raw Cline messages into ParsedMessages,
 // computing peak context tokens and maximum timestamp.
 func parseClineRawMessages(
@@ -456,8 +473,9 @@ func parseClineRawMessages(
 	peakCtx := 0
 	var maxTS time.Time
 
-	// Map of tool_use_id -> pointer to ParsedToolCall inside parsedMessages
-	pendingToolCalls := make(map[string]*ParsedToolCall)
+	// Keep indexes rather than pointers into parsedMessages. Appending a later
+	// message may grow the slice and invalidate pointers into its backing array.
+	pendingToolCalls := make(map[string]clineToolCallLocation)
 
 	for _, rawMsg := range rawMessages {
 		ts := time.UnixMilli(rawMsg.Timestamp)
@@ -525,16 +543,23 @@ func parseClineRawMessages(
 				toolResults = append(toolResults, tr)
 
 				// Pair with preceding tool call
-				if target, ok := pendingToolCalls[block.ToolUseID]; ok {
-					status := "completed"
-					if isErr {
-						status = "errored"
+				if target, ok := pendingToolCalls[block.ToolUseID]; ok &&
+					target.messageIndex >= 0 &&
+					target.messageIndex < len(parsedMessages) &&
+					target.toolIndex >= 0 &&
+					target.toolIndex < len(parsedMessages[target.messageIndex].ToolCalls) {
+					toolCall := &parsedMessages[target.messageIndex].ToolCalls[target.toolIndex]
+					if toolCall.ToolUseID == block.ToolUseID {
+						status := "completed"
+						if isErr {
+							status = "errored"
+						}
+						toolCall.ResultEvents = append(toolCall.ResultEvents, ParsedToolResultEvent{
+							Status:    status,
+							Content:   textContent,
+							Timestamp: ts,
+						})
 					}
-					target.ResultEvents = append(target.ResultEvents, ParsedToolResultEvent{
-						Status:    status,
-						Content:   textContent,
-						Timestamp: ts,
-					})
 				}
 			}
 		}
@@ -651,11 +676,14 @@ func parseClineRawMessages(
 
 		// Register tool calls in pending map for later pairing
 		if len(toolCalls) > 0 {
-			targetMsg := &parsedMessages[len(parsedMessages)-1]
-			for ci := range targetMsg.ToolCalls {
-				tc := &targetMsg.ToolCalls[ci]
+			messageIndex := len(parsedMessages) - 1
+			for ci := range parsedMessages[messageIndex].ToolCalls {
+				tc := parsedMessages[messageIndex].ToolCalls[ci]
 				if tc.ToolUseID != "" {
-					pendingToolCalls[tc.ToolUseID] = tc
+					pendingToolCalls[tc.ToolUseID] = clineToolCallLocation{
+						messageIndex: messageIndex,
+						toolIndex:    ci,
+					}
 				}
 			}
 		}
@@ -1089,8 +1117,20 @@ func parseClineTeammates(
 		// ahead. Legacy positional __runN IDs are ignored.
 		for _, rec := range chainRecs {
 			if hint, ok := storedSessionIDHints[rec.winner.path]; ok {
-				rawHint := strings.TrimPrefix(hint, string(AgentCline)+":")
+				// Normalize the stored full ID: strip host prefix, then agent prefix.
+				_, idAfterHost := StripHostPrefix(hint)
+				// We expect the idAfterHost to have the agent prefix for Cline.
+				if !strings.HasPrefix(idAfterHost, string(AgentCline)+":") {
+					// Not a Cline hint (or malformed); ignore.
+					continue
+				}
+				rawHint := strings.TrimPrefix(idAfterHost, string(AgentCline)+":")
 				if !clineLegacyRunSessionID(rawHint) {
+					// Validate the raw ID using the existing Cline lookup/session-ID safety rules.
+					if !ValidClineSessionID(rawHint) {
+						// Invalid raw ID; ignore.
+						continue
+					}
 					idByWinner[rec.winner] = rawHint
 					if rawHint == bareID {
 						usedBare = true
@@ -1111,10 +1151,10 @@ func parseClineTeammates(
 				)
 			}
 		}
-		if len(winners) > 0 {
-			// Preferred winner, not first emitted: the subagent's tool binding
-			// targets the most authoritative content file even when chain
-			// ordering or a new run puts a different file first.
+		if len(winners) == 1 {
+			// Winner ordering selects content. Link binding is only safe when
+			// there is one logical run; multiple runs cannot be matched from an
+			// agentId-only team_run_task payload, so those calls stay unlinked.
 			agentMap[sa] = string(AgentCline) + ":" + idByWinner[winners[0]]
 		}
 
@@ -1472,12 +1512,9 @@ func clineLastMessageIsThinkingOnly(messages []ParsedMessage) bool {
 // clineFingerprintSource computes a composite fingerprint from <sessionId>.json,
 // <sessionId>.messages.json, and any teammate *.messages.json files for freshness detection.
 func clineFingerprintSource(path string) (SourceFingerprint, error) {
-	info, err := os.Stat(path)
+	info, err := clineRegularFileInfo(path, false)
 	if err != nil {
-		return SourceFingerprint{}, fmt.Errorf("stat %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return SourceFingerprint{}, fmt.Errorf("stat %s: source is a directory", path)
+		return SourceFingerprint{}, err
 	}
 
 	fp := SourceFingerprint{
@@ -1493,7 +1530,7 @@ func clineFingerprintSource(path string) (SourceFingerprint, error) {
 	sessionDir := filepath.Dir(path)
 	sessionID := filepath.Base(sessionDir)
 	msgPath := filepath.Join(sessionDir, sessionID+".messages.json")
-	msgInfo, err := siblingMetadataFileInfo(msgPath)
+	msgInfo, err := clineRegularFileInfo(msgPath, true)
 	if err != nil {
 		return SourceFingerprint{}, err
 	}
@@ -1520,7 +1557,7 @@ func clineFingerprintSource(path string) (SourceFingerprint, error) {
 			continue
 		}
 		teammatePath := filepath.Join(sessionDir, name)
-		teammateInfo, err := siblingMetadataFileInfo(teammatePath)
+		teammateInfo, err := siblingMetadataFileInfoStrict(teammatePath)
 		if err != nil {
 			return SourceFingerprint{}, err
 		}
