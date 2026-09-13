@@ -190,14 +190,35 @@ func clineStoredSourceHintScope(root, path string) (StoredSourceHintScope, bool)
 // __teammate__ stable, __teammate__<subagent>__rid-<digest>, or legacy
 // __run<number>) back to the owning session metadata file.
 func clineFindFile(root, rawID string) (singleFileMatch, bool) {
-	if !isSafeSinglePathComponent(rawID) {
+	if !isSafeSinglePathComponent(rawID) || strings.ContainsAny(rawID, "\\/:\x00") {
 		return singleFileMatch{}, false
 	}
 	sessionID := rawID
-	if before, _, found := strings.Cut(rawID, "__teammate__"); found {
+	if before, sub, found := strings.Cut(rawID, "__teammate__"); found {
 		sessionID = before
-	} else if before, _, found := strings.Cut(rawID, "__teamtask__"); found {
+		if sub == "" {
+			return singleFileMatch{}, false
+		}
+		parts := strings.Split(sub, "__")
+		if len(parts) == 0 || !isValidClineTeammateSubagentName(parts[0]) {
+			return singleFileMatch{}, false
+		}
+		if len(parts) == 2 {
+			suffix := parts[1]
+			if !strings.HasPrefix(suffix, "run") && !strings.HasPrefix(suffix, "rid-") {
+				return singleFileMatch{}, false
+			}
+			if !isValidClineTeammateSubagentName(suffix) {
+				return singleFileMatch{}, false
+			}
+		} else if len(parts) > 2 {
+			return singleFileMatch{}, false
+		}
+	} else if before, sub, found := strings.Cut(rawID, "__teamtask__"); found {
 		sessionID = before
+		if sub == "" || !isSafeSinglePathComponent(sub) {
+			return singleFileMatch{}, false
+		}
 	}
 	if !ValidClineSessionID(sessionID) {
 		return singleFileMatch{}, false
@@ -242,8 +263,10 @@ func clineParseFile(
 }
 
 func clineProviderCapabilities() Capabilities {
+	sourceCaps := jsonlFileProviderSourceCapabilities()
+	sourceCaps.StoredSourceHints = CapabilitySupported
 	return Capabilities{
-		Source: jsonlFileProviderSourceCapabilities(),
+		Source: sourceCaps,
 		Content: ContentCapabilities{
 			FirstMessage:         CapabilitySupported,
 			SessionName:          CapabilitySupported,

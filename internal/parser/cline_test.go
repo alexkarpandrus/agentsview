@@ -1,8 +1,6 @@
 package parser
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"os"
@@ -13,17 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/money"
 )
-
-// clineRIDDigestForTest recomputes the stable chain-root digest the parser
-// derives from a raw session ID, so tests assert the exact normative rule
-// (rid-<first 32 hex of SHA-256>) rather than a hard-coded snapshot.
-func clineRIDDigestForTest(t *testing.T, rawSessionID string) string {
-	t.Helper()
-	h := sha256.New()
-	_, err := h.Write([]byte(rawSessionID))
-	require.NoError(t, err)
-	return hex.EncodeToString(h.Sum(nil))[:32]
-}
 
 // clineTeammateResultBySource returns the index lookup for a teammate result by
 // its raw source session ID, so tests assert identity by source identity,
@@ -1630,7 +1617,7 @@ func TestParseClineTeammates_DistinctRunsAndForks(t *testing.T) {
 	r2Idx, foundR2 := bySource("sess-runs__teamtask__worker__r2")
 	require.True(t, foundR2, "run r2 must be emitted")
 	assert.Equal(t,
-		"cline:sess-runs__teammate__worker__rid-"+clineRIDDigestForTest(t, "sess-runs__teamtask__worker__r2"),
+		"cline:sess-runs__teammate__worker__rid-66dac50a5846ff5766191f39df777111",
 		results[r2Idx].Session.ID)
 }
 
@@ -1683,7 +1670,7 @@ func TestParseClineTeammates_DivergentTailFork(t *testing.T) {
 	forkBIdx, foundB := bySource("sess-fork__teamtask__analyst__fb")
 	require.True(t, foundB, "fork fb must be emitted")
 	assert.Equal(t,
-		"cline:sess-fork__teammate__analyst__rid-"+clineRIDDigestForTest(t, "sess-fork__teamtask__analyst__fb"),
+		"cline:sess-fork__teammate__analyst__rid-5c065d3b562d3692e32fe6fa73b45ff2",
 		results[forkBIdx].Session.ID)
 }
 
@@ -1917,7 +1904,7 @@ func TestParseClineTeammates_StoredHintsAndRootDisappearance(t *testing.T) {
 	idx2, found2 := bySource("sess-hints__teamtask__worker__r2")
 	require.True(t, found2)
 	idB := resInitial[idx2].Session.ID
-	assert.Equal(t, "cline:sess-hints__teammate__worker__rid-"+clineRIDDigestForTest(t, "sess-hints__teamtask__worker__r2"), idB)
+	assert.Equal(t, "cline:sess-hints__teammate__worker__rid-85ebbf36bb56d477fe1bb557c2b74c22", idB)
 
 	// Phase 2: Add a third run that sorts first (lexicographically smaller rawSessionID: r0).
 	// With stored hints for r1 and r2, idA and idB remain unchanged; r0 gets a new rid-derived ID.
@@ -1950,7 +1937,7 @@ func TestParseClineTeammates_StoredHintsAndRootDisappearance(t *testing.T) {
 	idx0After, found0After := bySource("sess-hints__teamtask__worker__r0")
 	require.True(t, found0After)
 	assert.Equal(t,
-		"cline:sess-hints__teammate__worker__rid-"+clineRIDDigestForTest(t, "sess-hints__teamtask__worker__r0"),
+		"cline:sess-hints__teammate__worker__rid-204c17d75ceca53ea9cef9f4cbf1c9ee",
 		resWithRun0[idx0After].Session.ID)
 
 	// Phase 3: Root-file disappearance while continuation remains.
@@ -2020,7 +2007,7 @@ func TestParseClineTeammates_StoredHintsAndRootDisappearance(t *testing.T) {
 	bySrcNoHint := clineTeammateResultBySource(resWithoutHint)
 	c1NoHintIdx, _ := bySrcNoHint("sess-root-disappear__teamtask__scout__z_next")
 	assert.Equal(t,
-		"cline:sess-root-disappear__teammate__scout__rid-"+clineRIDDigestForTest(t, "sess-root-disappear__teamtask__scout__z_next"),
+		"cline:sess-root-disappear__teammate__scout__rid-d0813c84f1cfffcb08d69a8370751fcc",
 		resWithoutHint[c1NoHintIdx].Session.ID)
 
 	// Legacy __run2 hint is ignored and not reused

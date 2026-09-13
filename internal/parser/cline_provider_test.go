@@ -247,6 +247,91 @@ func TestClineClassifyPath_Teammates(t *testing.T) {
 	assert.Equal(t, metaPath, match.Path)
 }
 
+func TestClineProviderCapabilities(t *testing.T) {
+	provider, ok := NewProvider(AgentCline, ProviderConfig{Roots: []string{t.TempDir()}})
+	require.True(t, ok)
+	caps := provider.Capabilities()
+
+	assert.Equal(t, CapabilitySupported, caps.Source.StoredSourceHints)
+	assert.Equal(t, CapabilityNotApplicable, caps.Source.MultiSessionSource)
+	assert.Equal(t, CapabilityNotApplicable, caps.Source.ExcludedSessions)
+	assert.Equal(t, CapabilityNotApplicable, caps.Source.ForceReplaceOnParse)
+}
+
+func TestClineStoredSourceHintScope(t *testing.T) {
+	root := t.TempDir()
+	sessionsDir := filepath.Join(root, "data", "sessions")
+	sessionID := "1789000000001_scope"
+	sessDir := filepath.Join(sessionsDir, sessionID)
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+
+	metaPath := filepath.Join(sessDir, sessionID+".json")
+	require.NoError(t, os.WriteFile(metaPath, []byte(`{}`), 0o644))
+	msgPath := filepath.Join(sessDir, sessionID+".messages.json")
+	require.NoError(t, os.WriteFile(msgPath, []byte(`{}`), 0o644))
+	tmPath := filepath.Join(sessDir, "worker__t1.messages.json")
+	require.NoError(t, os.WriteFile(tmPath, []byte(`{}`), 0o644))
+
+	provider, ok := NewProvider(AgentCline, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	resolver, ok := provider.(StoredSourceHintScopeProvider)
+	require.True(t, ok, "cline provider must implement StoredSourceHintScopeProvider")
+
+	tests := []struct {
+		name      string
+		path      string
+		wantScope bool
+		wantPath  string
+	}{
+		{
+			name:      "metadata path resolves to session directory",
+			path:      metaPath,
+			wantScope: true,
+			wantPath:  sessDir,
+		},
+		{
+			name:      "companion messages path resolves to session directory",
+			path:      msgPath,
+			wantScope: true,
+			wantPath:  sessDir,
+		},
+		{
+			name:      "teammate transcript path resolves to same session directory",
+			path:      tmPath,
+			wantScope: true,
+			wantPath:  sessDir,
+		},
+		{
+			name:      "path outside cline layout returns no scope",
+			path:      filepath.Join(root, "unrelated.txt"),
+			wantScope: false,
+		},
+		{
+			name:      "sessions directory root itself returns no scope",
+			path:      sessionsDir,
+			wantScope: false,
+		},
+		{
+			name:      "hidden file returns no scope",
+			path:      filepath.Join(sessDir, ".secret.json"),
+			wantScope: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scopes := resolver.StoredSourceHintScopes(ChangedPathRequest{Path: tt.path})
+			if !tt.wantScope {
+				assert.Empty(t, scopes)
+				return
+			}
+			require.Len(t, scopes, 1)
+			assert.Equal(t, tt.wantPath, scopes[0].Path)
+			assert.False(t, scopes[0].IncludeVirtualMembers, "IncludeVirtualMembers must remain false for Cline")
+		})
+	}
+}
+
 func TestClineFindFile_Teammates(t *testing.T) {
 	root := t.TempDir()
 	sessionID := "sess-find-1"
@@ -256,41 +341,66 @@ func TestClineFindFile_Teammates(t *testing.T) {
 	metaPath := filepath.Join(sessDir, sessionID+".json")
 	require.NoError(t, os.WriteFile(metaPath, []byte(`{}`), 0o644))
 
-	// Looking up stable teammate session ID resolves to the parent session metadata file
-	stableID := "sess-find-1__teammate__scout"
-	match, ok := clineFindFile(root, stableID)
-	require.True(t, ok)
-	assert.Equal(t, metaPath, match.Path)
+	validTests := []struct {
+		name  string
+		rawID string
+	}{
+		{
+			name:  "parent ID",
+			rawID: sessionID,
+		},
+		{
+			name:  "bare teammate ID",
+			rawID: sessionID + "__teammate__scout",
+		},
+		{
+			name:  "root-derived rid ID",
+			rawID: sessionID + "__teammate__scout__rid-abcdef0123456789abcdef0123456789",
+		},
+		{
+			name:  "legacy positional runN ID",
+			rawID: sessionID + "__teammate__scout__run2",
+		},
+		{
+			name:  "legacy teamtask ID",
+			rawID: sessionID + "__teamtask__scout__t1",
+		},
+	}
 
-	// Distinct run suffix also resolves to parent
-	runID := "sess-find-1__teammate__scout__run2"
-	match, ok = clineFindFile(root, runID)
-	require.True(t, ok)
-	assert.Equal(t, metaPath, match.Path)
+	for _, tt := range validTests {
+		t.Run("valid/"+tt.name, func(t *testing.T) {
+			m, ok := clineFindFile(root, tt.rawID)
+			require.True(t, ok, "expected %s to resolve", tt.rawID)
+			assert.Equal(t, metaPath, m.Path)
+		})
+	}
 
-	// Stable digest suffix (__rid-<digest>) also resolves to parent
-	ridID := "sess-find-1__teammate__scout__rid-abcdef0123456789abcdef0123456789"
-	match, ok = clineFindFile(root, ridID)
-	require.True(t, ok)
-	assert.Equal(t, metaPath, match.Path)
+	hostileTests := []struct {
+		name  string
+		rawID string
+	}{
+		{name: "empty ID", rawID: ""},
+		{name: "dot", rawID: "."},
+		{name: "dot-dot", rawID: ".."},
+		{name: "parent traversal", rawID: "../" + sessionID},
+		{name: "subagent escape with forward slash", rawID: sessionID + "__teammate__scout__rid-abcdef0123456789/escape"},
+		{name: "subagent escape with backslash", rawID: sessionID + "__teammate__scout__rid-foo\\bar"},
+		{name: "subagent with colon", rawID: sessionID + "__teammate__scout__rid-a:b"},
+		{name: "parent with colon", rawID: "cline:" + sessionID},
+		{name: "parent with backslash", rawID: "sess-find\\evil__teammate__scout"},
+		{name: "parent with forward slash", rawID: "sess-find/evil__teammate__scout"},
+		{name: "dot-prefixed hidden session", rawID: ".secret__teammate__scout"},
+		{name: "underscore-prefixed session", rawID: "_hidden__teammate__scout"},
+		{name: "legacy run with slash", rawID: sessionID + "__teammate__scout__run2/escape"},
+		{name: "legacy run with traversal", rawID: "../" + sessionID + "__teammate__scout__run2"},
+		{name: "invalid suffix with dot-dot", rawID: sessionID + "__teammate__scout__rid-../evil"},
+		{name: "non-existent session", rawID: "non-existent-session-id"},
+	}
 
-	// Looking up raw teammate session ID resolves to the parent session metadata file
-	rawTeammateID := "sess-find-1__teamtask__scout__t1"
-	match, ok = clineFindFile(root, rawTeammateID)
-	require.True(t, ok)
-	assert.Equal(t, metaPath, match.Path)
-
-	// Hostile IDs are rejected
-	for _, hostile := range []string{
-		"../sess-find-1__teammate__scout",
-		"sess-find-1/evil__teammate__scout",
-		"sess-find-1\\evil__teammate__scout",
-		"_hidden__teammate__scout",
-		"sess-find-1__teammate__scout__rid-../evil",
-		"sess-find-1__teammate__scout__rid-foo/bar",
-		"sess-find-1__teammate__scout__rid-foo\\bar",
-	} {
-		_, ok := clineFindFile(root, hostile)
-		assert.False(t, ok, "expected %q to be rejected", hostile)
+	for _, tt := range hostileTests {
+		t.Run("hostile/"+tt.name, func(t *testing.T) {
+			_, ok := clineFindFile(root, tt.rawID)
+			assert.False(t, ok, "hostile rawID %q must be rejected", tt.rawID)
+		})
 	}
 }
