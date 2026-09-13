@@ -2115,3 +2115,51 @@ func TestParseClineTeammates_StoredHintsAndRootDisappearance(t *testing.T) {
 	c1LegacyIdx, _ := bySrcLegacy("sess-root-disappear__teamtask__scout__z_next")
 	assert.NotEqual(t, "cline:sess-root-disappear__teammate__scout__run2", resLegacy[c1LegacyIdx].Session.ID)
 }
+
+func TestParseClineTeammates_RecoversHintFromDeletedChainRoot(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "sess-deleted-chain-root"
+	sessDir := filepath.Join(dir, sessionID)
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	metaPath := filepath.Join(sessDir, sessionID+".json")
+	require.NoError(t, os.WriteFile(metaPath, []byte(`{"session_id":"`+sessionID+`"}`), 0o644))
+
+	rootPath := filepath.Join(sessDir, "worker__root.messages.json")
+	continuationPath := filepath.Join(sessDir, "worker__continuation.messages.json")
+	rootJSON := `{
+		"sessionId":"sess-deleted-chain-root__teamtask__worker__root",
+		"origin":{"sessionId":"sess-deleted-chain-root__teamtask__worker__root","subagent":"worker"},
+		"messages":[{"id":"root-1","role":"user","content":[{"type":"text","text":"start"}],"ts":1000}]
+	}`
+	continuationJSON := `{
+		"sessionId":"sess-deleted-chain-root__teamtask__worker__continuation",
+		"origin":{"sessionId":"sess-deleted-chain-root__teamtask__worker__continuation","subagent":"worker"},
+		"messages":[
+			{"id":"root-1","role":"user","content":[{"type":"text","text":"start"}],"ts":1000},
+			{"id":"continuation-1","role":"assistant","content":[{"type":"text","text":"continued"}],"ts":2000}
+		]
+	}`
+	require.NoError(t, os.WriteFile(rootPath, []byte(rootJSON), 0o644))
+	require.NoError(t, os.WriteFile(continuationPath, []byte(continuationJSON), 0o644))
+
+	stableID := "sess-deleted-chain-root__teammate__worker__rid-abcdef0123456789abcdef0123456789"
+	hints := map[string]string{rootPath: "remote-host~cline:" + stableID}
+
+	results, err := parseClineSessionWithTeammates(metaPath, "proj", "local", hints)
+	require.NoError(t, err)
+	bySource := clineTeammateResultBySource(results)
+	continuationIndex, found := bySource("sess-deleted-chain-root__teamtask__worker__continuation")
+	require.True(t, found)
+	assert.Equal(t, "cline:"+stableID, results[continuationIndex].Session.ID)
+
+	// The old snapshot is now gone before the next parse. Its archive hint is
+	// the only durable identity for the continuation, so the parser must still
+	// recover the same non-bare ID instead of minting the bare form.
+	require.NoError(t, os.Remove(rootPath))
+	results, err = parseClineSessionWithTeammates(metaPath, "proj", "local", hints)
+	require.NoError(t, err)
+	bySource = clineTeammateResultBySource(results)
+	continuationIndex, found = bySource("sess-deleted-chain-root__teamtask__worker__continuation")
+	require.True(t, found)
+	assert.Equal(t, "cline:"+stableID, results[continuationIndex].Session.ID)
+}

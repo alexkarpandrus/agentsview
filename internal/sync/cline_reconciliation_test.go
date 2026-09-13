@@ -86,6 +86,76 @@ func TestClineReconciliation_DeletedTeammateLifecycle(t *testing.T) {
 	assert.Nil(t, revived.DeletedAt)
 }
 
+func TestClineReconciliation_ContinuationAppearsAfterRootRemoval(t *testing.T) {
+	root := t.TempDir()
+	sessDir := filepath.Join(root, "data", "sessions", "sess-late-continuation")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+
+	metaPath := filepath.Join(sessDir, "sess-late-continuation.json")
+	require.NoError(t, os.WriteFile(
+		metaPath,
+		[]byte(`{"session_id":"sess-late-continuation","cwd":"/workspace"}`),
+		0o644,
+	))
+
+	aRootPath := filepath.Join(sessDir, "worker__a_root.messages.json")
+	bRootPath := filepath.Join(sessDir, "worker__b_root.messages.json")
+	require.NoError(t, os.WriteFile(aRootPath, []byte(`{
+		"sessionId":"sess-late-continuation__teamtask__worker__a_root",
+		"origin":{"subagent":"worker"},
+		"messages":[{"id":"a1","role":"user","content":[{"type":"text","text":"a"}],"ts":1000}]
+	}`), 0o644))
+	require.NoError(t, os.WriteFile(bRootPath, []byte(`{
+		"sessionId":"sess-late-continuation__teamtask__worker__b_root",
+		"origin":{"subagent":"worker"},
+		"messages":[{"id":"b1","role":"user","content":[{"type":"text","text":"b"}],"ts":2000}]
+	}`), 0o644))
+
+	database := dbtest.OpenTestDB(t)
+	engine := NewEngine(database, EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{parser.AgentCline: {root}},
+		Machine:   "test-machine",
+	})
+	t.Cleanup(engine.Close)
+
+	first := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 3, first.Synced)
+	bIDs, err := database.ListSessionIDsByFilePath(bRootPath, string(parser.AgentCline))
+	require.NoError(t, err)
+	require.Len(t, bIDs, 1)
+	stableBID := bIDs[0]
+
+	// The continuation is first observed only after its root snapshot has been
+	// removed. The archive's old file-path hint is the identity bridge.
+	require.NoError(t, os.Remove(bRootPath))
+	bContinuationPath := filepath.Join(sessDir, "worker__b_continuation.messages.json")
+	require.NoError(t, os.WriteFile(bContinuationPath, []byte(`{
+		"sessionId":"sess-late-continuation__teamtask__worker__b_continuation",
+		"origin":{"subagent":"worker"},
+		"messages":[
+			{"id":"b1","role":"user","content":[{"type":"text","text":"b"}],"ts":2000},
+			{"id":"b2","role":"assistant","content":[{"type":"text","text":"continued"}],"ts":3000}
+		]
+	}`), 0o644))
+	now := time.Now().Add(5 * time.Second)
+	require.NoError(t, os.Chtimes(metaPath, now, now))
+
+	second := engine.SyncAll(t.Context(), nil)
+	require.Greater(t, second.Synced, 0)
+	continued, err := database.GetSessionFull(t.Context(), stableBID)
+	require.NoError(t, err)
+	require.NotNil(t, continued)
+	assert.Nil(t, continued.SourceMissingAt)
+	assert.Nil(t, continued.DeletedAt)
+	require.NotNil(t, continued.FilePath)
+	assert.Equal(t, bContinuationPath, *continued.FilePath)
+	continuedIDs, err := database.ListSessionIDsByFilePath(
+		bContinuationPath, string(parser.AgentCline),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{stableBID}, continuedIDs)
+}
+
 func TestClineRemoteIdentityStableAcrossResyncs(t *testing.T) {
 	root := t.TempDir()
 	sessDir := filepath.Join(root, "data", "sessions", "sess-remote")

@@ -164,10 +164,10 @@ func parseClineSession(
 }
 
 // parseClineSessionWithTeammates parses a Cline session and any sibling teammate
-// subagent transcripts into ParseResults. storedSessionIDHints maps the exact
-// stored path of each teammate transcript (or the session metadata path) to the
-// full session ID an active archive row owns; the parser reuses non-positional
-// values and ignores legacy positional __runN values.
+// subagent transcripts into ParseResults. storedSessionIDHints maps stored
+// teammate transcript paths (or the session metadata path) to the full session
+// ID an active archive row owns; the parser reuses non-positional values from
+// any path in a continuation chain and ignores legacy positional __runN values.
 func parseClineSessionWithTeammates(
 	metaPath string,
 	projectHint string,
@@ -868,6 +868,54 @@ func clineLegacyRunSessionID(id string) bool {
 	return true
 }
 
+// clineStoredSessionID normalizes an archive hint to the provider-local raw
+// Cline ID. Hints are stored as full IDs and may carry a remote host prefix;
+// parsing must not re-emit either prefix because the sync layer owns that
+// rewriting step.
+func clineStoredSessionID(hint string) (string, bool) {
+	_, idAfterHost := StripHostPrefix(hint)
+	prefix := string(AgentCline) + ":"
+	if !strings.HasPrefix(idAfterHost, prefix) {
+		return "", false
+	}
+	rawID := strings.TrimPrefix(idAfterHost, prefix)
+	if clineLegacyRunSessionID(rawID) || !ValidClineSessionID(rawID) {
+		return "", false
+	}
+	return rawID, true
+}
+
+func clineStoredTeammateID(
+	hint, parentSessionID, subagent string,
+) (string, bool) {
+	rawID, ok := clineStoredSessionID(hint)
+	if !ok {
+		return "", false
+	}
+	bareID := parentSessionID + "__teammate__" + subagent
+	return rawID, rawID == bareID || strings.HasPrefix(rawID, bareID+"__")
+}
+
+// clineChainCandidates returns every currently present snapshot whose
+// message-ID sequence is a prefix of winner's sequence. A stored identity may
+// live on any one of these paths, not only on the content winner.
+func clineChainCandidates(
+	winner *clineTeammateCandidate,
+	cands []*clineTeammateCandidate,
+) []*clineTeammateCandidate {
+	chain := make([]*clineTeammateCandidate, 0, len(cands))
+	for _, cand := range cands {
+		if cand == winner || (len(cand.msgIDs) <= len(winner.msgIDs) &&
+			isMessagePrefixSuperset(cand.msgIDs, winner.msgIDs)) {
+			chain = append(chain, cand)
+		}
+	}
+	sort.SliceStable(chain, func(i, j int) bool {
+		return clineChainRootLess(chain[i], chain[j])
+	})
+	return chain
+}
+
 // clineRIDDigest returns the first 32 hexadecimal characters of SHA-256 over
 // raw, the stable content identity for one chain root. The digest never embeds
 // the raw session ID, so it cannot introduce __ delimiters or other unsafe
@@ -911,9 +959,9 @@ func clineDerivedChainID(
 // Continuations of the same subagent (sharing an exact message ID prefix) are coalesced
 // into a single authoritative session under a stable ID (cline:<parent>__teammate__<subagent>),
 // while distinct runs (e.g. non-continuation restarts) remain separate sessions.
-// storedSessionIDHints maps the exact stored path of each teammate transcript to the
-// full session ID an active archive row owns; non-positional values are authoritative
-// and legacy positional __runN values are ignored.
+// storedSessionIDHints maps stored teammate transcript paths to the full session
+// ID an active archive row owns; non-positional values are authoritative and
+// legacy positional __runN values are ignored.
 func parseClineTeammates(
 	sessionDir string,
 	parentSessionID string,
@@ -1112,29 +1160,54 @@ func parseClineTeammates(
 		bareID := parentSessionID + "__teammate__" + sa
 		idByWinner := make(map[*clineTeammateCandidate]string)
 		usedBare := false
-		// Authoritative stored exact-path hints first: an existing persisted
-		// non-positional ID must not be reassigned, even when a new run sorts
-		// ahead. Legacy positional __runN IDs are ignored.
+		usedIDs := make(map[string]bool)
+		// Authoritative stored hints first: an existing persisted non-positional
+		// ID must not be reassigned, even when a new run sorts ahead. Search every
+		// currently present snapshot in the prefix chain, because winner.Path can
+		// change when a continuation supersedes the hinted snapshot. Legacy
+		// positional __runN IDs are ignored.
 		for _, rec := range chainRecs {
-			if hint, ok := storedSessionIDHints[rec.winner.path]; ok {
-				// Normalize the stored full ID: strip host prefix, then agent prefix.
-				_, idAfterHost := StripHostPrefix(hint)
-				// We expect the idAfterHost to have the agent prefix for Cline.
-				if !strings.HasPrefix(idAfterHost, string(AgentCline)+":") {
-					// Not a Cline hint (or malformed); ignore.
+			for _, cand := range clineChainCandidates(rec.winner, cands) {
+				hint, ok := storedSessionIDHints[cand.path]
+				if !ok {
 					continue
 				}
-				rawHint := strings.TrimPrefix(idAfterHost, string(AgentCline)+":")
-				if !clineLegacyRunSessionID(rawHint) {
-					// Validate the raw ID using the existing Cline lookup/session-ID safety rules.
-					if !ValidClineSessionID(rawHint) {
-						// Invalid raw ID; ignore.
-						continue
-					}
-					idByWinner[rec.winner] = rawHint
-					if rawHint == bareID {
-						usedBare = true
-					}
+				rawHint, ok := clineStoredTeammateID(hint, parentSessionID, sa)
+				if !ok || usedIDs[rawHint] {
+					continue
+				}
+				idByWinner[rec.winner] = rawHint
+				usedIDs[rawHint] = true
+				if rawHint == bareID {
+					usedBare = true
+				}
+				break
+			}
+		}
+		// If the root snapshot disappeared before its continuation was first
+		// observed, no current candidate can carry the old path hint. Recover a
+		// persisted identity only when exactly one current chain and one
+		// unclaimed ID remain; guessing in a multi-run archive would be worse than
+		// allowing a visible delete/create transition.
+		unassigned := make([]*clineChainRec, 0)
+		for _, rec := range chainRecs {
+			if _, ok := idByWinner[rec.winner]; !ok {
+				unassigned = append(unassigned, rec)
+			}
+		}
+		orphanIDs := make(map[string]struct{})
+		for _, hint := range storedSessionIDHints {
+			rawHint, ok := clineStoredTeammateID(hint, parentSessionID, sa)
+			if ok && !usedIDs[rawHint] {
+				orphanIDs[rawHint] = struct{}{}
+			}
+		}
+		if len(unassigned) == 1 && len(orphanIDs) == 1 {
+			for rawHint := range orphanIDs {
+				idByWinner[unassigned[0].winner] = rawHint
+				usedIDs[rawHint] = true
+				if rawHint == bareID {
+					usedBare = true
 				}
 			}
 		}
@@ -1516,6 +1589,14 @@ func clineFingerprintSource(path string) (SourceFingerprint, error) {
 	if err != nil {
 		return SourceFingerprint{}, err
 	}
+	sessionDir := filepath.Dir(filepath.Clean(path))
+	dirInfo, err := os.Lstat(sessionDir)
+	if err != nil {
+		return SourceFingerprint{}, fmt.Errorf("stat cline session directory %s: %w", sessionDir, err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() {
+		return SourceFingerprint{}, fmt.Errorf("stat cline session directory %s: source is not a real directory", sessionDir)
+	}
 
 	fp := SourceFingerprint{
 		Size:    info.Size(),
@@ -1527,7 +1608,6 @@ func clineFingerprintSource(path string) (SourceFingerprint, error) {
 		return SourceFingerprint{}, err
 	}
 
-	sessionDir := filepath.Dir(path)
 	sessionID := filepath.Base(sessionDir)
 	msgPath := filepath.Join(sessionDir, sessionID+".messages.json")
 	msgInfo, err := clineRegularFileInfo(msgPath, true)

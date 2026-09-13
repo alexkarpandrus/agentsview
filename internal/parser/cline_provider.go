@@ -33,6 +33,12 @@ func newClineProviderFactory(def AgentDef) ProviderFactory {
 					return clineFindFile(root, rawID)
 				}),
 				WithFileFingerprint(func(src singleFileSource) (SourceFingerprint, error) {
+					if _, ok := clineClassifyPath(src.Root, src.Path, false); !ok {
+						return SourceFingerprint{}, fmt.Errorf(
+							"cline source is outside the configured session root: %s",
+							src.Path,
+						)
+					}
 					return clineFingerprintSource(src.Path)
 				}),
 				WithFileStoredSourceHintScope(clineStoredSourceHintScope),
@@ -102,6 +108,10 @@ func clineDiscoverEach(
 			return nil
 		}
 		sessionID := entry.Name()
+		sessionDir := filepath.Join(sessionsDir, sessionID)
+		if !clineSessionDirectoryWithinRoot(root, sessionDir, false) {
+			return nil
+		}
 		metaPath := filepath.Join(sessionsDir, sessionID, sessionID+".json")
 		info, err := clineRegularFileInfo(metaPath, true)
 		if err != nil || info == nil {
@@ -133,6 +143,41 @@ func clineRegularFileInfo(path string, allowMissing bool) (os.FileInfo, error) {
 		return nil, fmt.Errorf("stat %s: source is not a regular file", path)
 	}
 	return info, nil
+}
+
+// clineSessionDirectoryWithinRoot validates the directory component that
+// owns a Cline session. The lexical check prevents traversal, Lstat rejects a
+// symlink at the session-directory boundary, and the resolved-path check
+// prevents an intermediate symlink (for example data/) from escaping the
+// configured Cline root. A missing session directory remains valid only for
+// changed-path tombstone classification.
+func clineSessionDirectoryWithinRoot(
+	root, sessionDir string, allowMissing bool,
+) bool {
+	root = filepath.Clean(root)
+	sessionsDir := clineResolveSessionsDir(root)
+	sessionDir = filepath.Clean(sessionDir)
+	if !isWithinRoot(sessionsDir, sessionDir) || sessionDir == sessionsDir {
+		return false
+	}
+
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return allowMissing && os.IsNotExist(err)
+	}
+
+	info, err := os.Lstat(sessionDir)
+	if os.IsNotExist(err) {
+		return allowMissing
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false
+	}
+	resolvedSessionDir, err := filepath.EvalSymlinks(sessionDir)
+	if err != nil {
+		return false
+	}
+	return isWithinRoot(resolvedRoot, resolvedSessionDir)
 }
 
 func clineWatchRoots(roots []string) []WatchRoot {
@@ -170,6 +215,10 @@ func clineClassifyPath(
 	filename := parts[1]
 
 	if !ValidClineSessionID(sessionID) {
+		return singleFileMatch{}, false
+	}
+	sessionDir := filepath.Join(sessionsDir, sessionID)
+	if !clineSessionDirectoryWithinRoot(root, sessionDir, allowMissing) {
 		return singleFileMatch{}, false
 	}
 
@@ -252,7 +301,11 @@ func clineFindFile(root, rawID string) (singleFileMatch, bool) {
 		return singleFileMatch{}, false
 	}
 	sessionsDir := clineResolveSessionsDir(root)
-	metaPath := filepath.Join(sessionsDir, sessionID, sessionID+".json")
+	sessionDir := filepath.Join(sessionsDir, sessionID)
+	if !clineSessionDirectoryWithinRoot(root, sessionDir, false) {
+		return singleFileMatch{}, false
+	}
+	metaPath := filepath.Join(sessionDir, sessionID+".json")
 	if !isWithinRoot(sessionsDir, metaPath) {
 		return singleFileMatch{}, false
 	}
@@ -265,6 +318,11 @@ func clineFindFile(root, rawID string) (singleFileMatch, bool) {
 func clineParseFile(
 	src singleFileSource, req ParseRequest,
 ) ([]ParseResult, []string, error) {
+	if _, ok := clineClassifyPath(src.Root, src.Path, false); !ok {
+		return nil, nil, fmt.Errorf(
+			"cline source is outside the configured session root: %s", src.Path,
+		)
+	}
 	results, err := parseClineSessionWithTeammates(
 		src.Path, req.Source.ProjectHint, req.Machine, req.StoredSessionIDHints,
 	)

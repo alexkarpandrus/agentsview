@@ -12451,7 +12451,7 @@ func (e *Engine) providerSourceSessionOwnershipsForForceReplace(
 	return members, nil
 }
 
-// clineStoredSessionIDHints builds the exact-path identity hints for a Cline
+// clineStoredSessionIDHints builds the stored-path identity hints for a Cline
 // session-directory parse: stored source File.Path to the full session ID the
 // active row owns. Hints come only from active rows under the
 // session-directory ownership scope, and an exact path contributes only when

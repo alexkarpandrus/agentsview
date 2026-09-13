@@ -238,6 +238,47 @@ func TestClinePrimarySymlinksAreRejected(t *testing.T) {
 	require.NoError(t, os.WriteFile(msgTarget, []byte(`{"messages":[{"id":"changed"}]}`), 0o644))
 }
 
+func TestClineSessionDirectorySymlinkEscapingRootIsRejected(t *testing.T) {
+	root := t.TempDir()
+	sessionsDir := filepath.Join(root, "data", "sessions")
+	require.NoError(t, os.MkdirAll(sessionsDir, 0o755))
+
+	sessionID := "1789000000008_session_escape"
+	outsideSession := filepath.Join(t.TempDir(), sessionID)
+	require.NoError(t, os.MkdirAll(outsideSession, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outsideSession, sessionID+".json"),
+		[]byte(`{"session_id":"`+sessionID+`"}`), 0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outsideSession, sessionID+".messages.json"),
+		[]byte(`{"messages":[]}`), 0o644,
+	))
+
+	linkedSession := filepath.Join(sessionsDir, sessionID)
+	symlinkOrSkip(t, outsideSession, linkedSession)
+	metaPath := filepath.Join(linkedSession, sessionID+".json")
+
+	provider, ok := NewProvider(AgentCline, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	paths, err := clineDiscoverPaths(t, provider)
+	require.NoError(t, err)
+	assert.Empty(t, paths, "a session directory symlink must not be discovered")
+
+	_, ok = clineClassifyPath(root, metaPath, false)
+	assert.False(t, ok, "a changed path through a session-directory symlink must be rejected")
+	_, ok = clineFindFile(root, sessionID)
+	assert.False(t, ok, "lookup must not resolve a session-directory symlink")
+
+	scopes := provider.(StoredSourceHintScopeProvider).StoredSourceHintScopes(
+		ChangedPathRequest{Path: metaPath},
+	)
+	assert.Empty(t, scopes, "an escaping session directory must have no ownership scope")
+
+	_, _, err = clineParseFile(singleFileSource{Root: root, Path: metaPath}, ParseRequest{})
+	assert.Error(t, err, "parsing must reject the path before reading the external metadata")
+}
+
 func TestClineDiscovery_MissingDataSessions(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "settings"), 0o755))
