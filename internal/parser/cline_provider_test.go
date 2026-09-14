@@ -451,26 +451,9 @@ func TestClineFindFile_Teammates(t *testing.T) {
 		name  string
 		rawID string
 	}{
-		{
-			name:  "parent ID",
-			rawID: sessionID,
-		},
-		{
-			name:  "bare teammate ID",
-			rawID: sessionID + "__teammate__scout",
-		},
-		{
-			name:  "root-derived rid ID",
-			rawID: sessionID + "__teammate__scout__rid-abcdef0123456789abcdef0123456789",
-		},
-		{
-			name:  "legacy positional runN ID",
-			rawID: sessionID + "__teammate__scout__run2",
-		},
-		{
-			name:  "legacy teamtask ID",
-			rawID: sessionID + "__teamtask__scout__t1",
-		},
+		{name: "parent ID", rawID: sessionID},
+		{name: "teamtask ID", rawID: sessionID + "__teamtask__scout__t1"},
+		{name: "teamtask ID with long nonce", rawID: sessionID + "__teamtask__scout__1789207950000_ab12cd"},
 	}
 
 	for _, tt := range validTests {
@@ -489,17 +472,17 @@ func TestClineFindFile_Teammates(t *testing.T) {
 		{name: "dot", rawID: "."},
 		{name: "dot-dot", rawID: ".."},
 		{name: "parent traversal", rawID: "../" + sessionID},
-		{name: "subagent escape with forward slash", rawID: sessionID + "__teammate__scout__rid-abcdef0123456789/escape"},
-		{name: "subagent escape with backslash", rawID: sessionID + "__teammate__scout__rid-foo\\bar"},
-		{name: "subagent with colon", rawID: sessionID + "__teammate__scout__rid-a:b"},
+		{name: "teamtask with empty suffix", rawID: sessionID + "__teamtask__"},
+		{name: "teamtask escape with forward slash", rawID: sessionID + "__teamtask__scout/escape"},
+		{name: "teamtask escape with backslash", rawID: sessionID + "__teamtask__scout\\bar"},
+		{name: "teamtask with colon", rawID: sessionID + "__teamtask__scout:t1"},
 		{name: "parent with colon", rawID: "cline:" + sessionID},
-		{name: "parent with backslash", rawID: "sess-find\\evil__teammate__scout"},
-		{name: "parent with forward slash", rawID: "sess-find/evil__teammate__scout"},
-		{name: "dot-prefixed hidden session", rawID: ".secret__teammate__scout"},
-		{name: "underscore-prefixed session", rawID: "_hidden__teammate__scout"},
-		{name: "legacy run with slash", rawID: sessionID + "__teammate__scout__run2/escape"},
-		{name: "legacy run with traversal", rawID: "../" + sessionID + "__teammate__scout__run2"},
-		{name: "invalid suffix with dot-dot", rawID: sessionID + "__teammate__scout__rid-../evil"},
+		{name: "parent with backslash", rawID: "sess-find\\evil__teamtask__scout__t1"},
+		{name: "parent with forward slash", rawID: "sess-find/evil__teamtask__scout__t1"},
+		{name: "dot-prefixed hidden session", rawID: ".secret__teamtask__scout__t1"},
+		{name: "underscore-prefixed session", rawID: "_hidden__teamtask__scout__t1"},
+		{name: "teamtask with traversal", rawID: "../" + sessionID + "__teamtask__scout__t1"},
+		{name: "old teammate form is not an ID", rawID: sessionID + "__teammate__scout"},
 		{name: "non-existent session", rawID: "non-existent-session-id"},
 	}
 

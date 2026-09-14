@@ -274,39 +274,19 @@ func clineStoredSourceHintScope(root, path string) (StoredSourceHintScope, bool)
 	}, true
 }
 
-// clineFindFile resolves a Cline raw session ID (parent, __teamtask__ teammate,
-// __teammate__ stable, __teammate__<subagent>__rid-<digest>, or legacy
-// __run<number>) back to the owning session metadata file.
+// clineFindFile resolves a raw Cline session ID back to the owning session
+// metadata file. Accepted shapes are the parent ID "<id>" and the teammate ID
+// "<id>__teamtask__<suffix>" that Cline writes into teammate transcripts.
 func clineFindFile(root, rawID string) (singleFileMatch, bool) {
 	if !isSafeSinglePathComponent(rawID) || strings.ContainsAny(rawID, "\\/:\x00") {
 		return singleFileMatch{}, false
 	}
 	sessionID := rawID
-	if before, sub, found := strings.Cut(rawID, "__teammate__"); found {
+	if before, suffix, found := strings.Cut(rawID, "__teamtask__"); found {
+		if suffix == "" {
+			return singleFileMatch{}, false
+		}
 		sessionID = before
-		if sub == "" {
-			return singleFileMatch{}, false
-		}
-		parts := strings.Split(sub, "__")
-		if len(parts) == 0 || !isValidClineTeammateSubagentName(parts[0]) {
-			return singleFileMatch{}, false
-		}
-		if len(parts) == 2 {
-			suffix := parts[1]
-			if !strings.HasPrefix(suffix, "run") && !strings.HasPrefix(suffix, "rid-") {
-				return singleFileMatch{}, false
-			}
-			if !isValidClineTeammateSubagentName(suffix) {
-				return singleFileMatch{}, false
-			}
-		} else if len(parts) > 2 {
-			return singleFileMatch{}, false
-		}
-	} else if before, sub, found := strings.Cut(rawID, "__teamtask__"); found {
-		sessionID = before
-		if sub == "" || !isSafeSinglePathComponent(sub) {
-			return singleFileMatch{}, false
-		}
 	}
 	if !ValidClineSessionID(sessionID) {
 		return singleFileMatch{}, false
