@@ -323,8 +323,13 @@ func buildResolveScript() string {
 			"av_cline_meta=\"$av_cline_sess/$av_cline_id.json\"; " +
 			"[ -f \"$av_cline_meta\" ] || continue; " +
 			"[ -L \"$av_cline_meta\" ] && continue; " +
-			"av_emit_agent_file \"" + string(parser.AgentCline) + "\" \"$av_cline_meta\"; " +
 			"av_cline_msgs=\"$av_cline_sess/$av_cline_id.messages.json\"; " +
+			// A present Cline primary messages path must be a real regular
+			// file. A missing path remains valid because Cline metadata-only
+			// sessions are supported.
+			"if [ -e \"$av_cline_msgs\" ] || [ -L \"$av_cline_msgs\" ]; then " +
+			"[ -f \"$av_cline_msgs\" ] && [ ! -L \"$av_cline_msgs\" ] || continue; fi; " +
+			"av_emit_agent_file \"" + string(parser.AgentCline) + "\" \"$av_cline_meta\"; " +
 			"[ -f \"$av_cline_msgs\" ] && [ ! -L \"$av_cline_msgs\" ] && " +
 			"av_emit_agent_file \"" + string(parser.AgentCline) + "\" \"$av_cline_msgs\"; " +
 			"for av_cline_tm in \"$av_cline_sess\"/*__*.messages.json; do " +

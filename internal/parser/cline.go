@@ -1589,6 +1589,9 @@ func clineFingerprintSource(path string) (SourceFingerprint, error) {
 	if err != nil {
 		return SourceFingerprint{}, err
 	}
+	if info == nil {
+		return SourceFingerprint{}, fmt.Errorf("stat %s: source is missing", path)
+	}
 	sessionDir := filepath.Dir(filepath.Clean(path))
 	dirInfo, err := os.Lstat(sessionDir)
 	if err != nil {

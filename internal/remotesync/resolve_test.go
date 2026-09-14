@@ -1484,7 +1484,8 @@ func TestClineLeafSymlinkParity(t *testing.T) {
 	require.NoError(t, os.Symlink(secretFile, filepath.Join(sessMetaLink, "sess-symlink-meta.json")))
 	require.NoError(t, os.WriteFile(filepath.Join(sessMetaLink, "sess-symlink-meta.messages.json"), []byte(`{"messages":[]}`), 0o644))
 
-	// sess-symlink-msgs: valid metadata, but messages file is a symlink pointing outside root.
+	// sess-symlink-msgs: the primary messages file is a symlink, so the whole
+	// session must be rejected rather than emitting its metadata alone.
 	sessMsgsLink := filepath.Join(sessionsDir, "sess-symlink-msgs")
 	require.NoError(t, os.MkdirAll(sessMsgsLink, 0o755))
 	validMeta2 := filepath.Join(sessMsgsLink, "sess-symlink-msgs.json")
@@ -1496,7 +1497,7 @@ func TestClineLeafSymlinkParity(t *testing.T) {
 			parser.AgentCline: {clineRoot},
 		},
 	})
-	expectedFiles := []string{validMeta, validMsgs, validTm, validMeta2}
+	expectedFiles := []string{validMeta, validMsgs, validTm}
 	assert.ElementsMatch(t, expectedFiles, goTargets.Files[parser.AgentCline])
 
 	cmd := exec.Command("sh")
