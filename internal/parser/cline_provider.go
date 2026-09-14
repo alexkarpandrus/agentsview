@@ -168,7 +168,7 @@ func clineSessionDirectoryWithinRoot(
 		return false
 	}
 	current := root
-	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+	for component := range strings.SplitSeq(rel, string(filepath.Separator)) {
 		if component == "" || component == "." {
 			continue
 		}
