@@ -177,3 +177,55 @@ func TestInstallationAdoptionKeepsNewestRootObservation(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallationAdoptionKeepsSourceArchiveBoundaries(t *testing.T) {
+	database := testDB(t)
+	const identity = "0123456789abcdef0123456789abcdef"
+	const former = "oldhost.example"
+	require.NoError(t, database.Update(func(tx bun.Tx) error {
+		for _, archive := range []string{"archive-a", "archive-b"} {
+			if _, err := tx.Exec(`INSERT INTO source_archives (source_archive_id, source_archive_salt) VALUES (?, ?)`, archive, archive+"-salt"); err != nil {
+				return err
+			}
+		}
+		for _, row := range []struct {
+			archive, machine, project, branch, observed string
+		}{
+			{"archive-a", former, "project-a", "a-new", "2026-07-01T00:00:02Z"},
+			{"archive-a", identity, "project-a", "a-old", "2026-07-01T00:00:01Z"},
+			{"archive-b", former, "project-b", "b-old", "2026-07-01T00:00:00Z"},
+		} {
+			if _, err := tx.Exec(`INSERT INTO source_worktree_project_mappings
+				(source_archive_id, machine, path_prefix, project) VALUES (?, ?, '/workspace/shared', ?)`,
+				row.archive, row.machine, row.project); err != nil {
+				return err
+			}
+			// Observations share all identity keys except archive and machine.
+			// The older archive-b row must survive archive-a's newer evidence.
+			if _, err := tx.Exec(`INSERT INTO source_project_identity_observations
+				(source_archive_id, machine, project, root_path, git_remote, git_branch, observed_at)
+				VALUES (?, ?, 'shared', '/workspace/shared', '', ?, ?)`,
+				row.archive, row.machine, row.branch, row.observed); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, database.AdoptMachineIdentity(t.Context(), identity, []string{former}))
+	type retainedRow struct {
+		Archive string `bun:"source_archive_id"`
+		Machine string
+		Value   string
+	}
+	var rules, observations []retainedRow
+	require.NoError(t, database.view(t.Context(), func(store bun.IDB) error {
+		return store.NewRaw(`SELECT source_archive_id, machine, project AS value
+			FROM source_worktree_project_mappings ORDER BY source_archive_id`).Scan(t.Context(), &rules)
+	}))
+	require.NoError(t, database.view(t.Context(), func(store bun.IDB) error {
+		return store.NewRaw(`SELECT source_archive_id, machine, git_branch AS value
+			FROM source_project_identity_observations ORDER BY source_archive_id`).Scan(t.Context(), &observations)
+	}))
+	assert.Equal(t, []retainedRow{{"archive-a", identity, "project-a"}, {"archive-b", identity, "project-b"}}, rules)
+	assert.Equal(t, []retainedRow{{"archive-a", identity, "a-new"}, {"archive-b", identity, "b-old"}}, observations)
+}

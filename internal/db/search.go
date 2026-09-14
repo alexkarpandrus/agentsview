@@ -350,7 +350,7 @@ type sqliteFullTextCapability struct {
 func (capability sqliteFullTextCapability) Search(
 	ctx context.Context, store bun.IDB, f SearchFilter,
 ) ([]SearchResult, error) {
-	ftsQuery, err := capability.store.prepareMessageFTSQuery(ctx, f.Query)
+	ftsQuery, err := capability.store.prepareMessageFTSQuery(ctx, store, f.Query)
 	if err != nil {
 		return nil, err
 	}
@@ -582,7 +582,7 @@ func (capability sqliteFullTextCapability) SearchSession(
 func (capability sqliteFullTextCapability) SearchContent(
 	ctx context.Context, store bun.IDB, filter ContentSearchFilter,
 ) ([]ContentSearchHit, error) {
-	ftsQuery, err := capability.store.prepareMessageFTSQuery(ctx, filter.Pattern)
+	ftsQuery, err := capability.store.prepareMessageFTSQuery(ctx, store, filter.Pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +625,7 @@ func (capability sqliteFullTextCapability) SearchContent(
 func (capability sqliteFullTextCapability) SearchHybridContent(
 	ctx context.Context, store bun.IDB, filter ContentSearchFilter,
 ) ([]ContentSearchHit, error) {
-	ftsQuery, err := capability.store.prepareMessageFTSQuery(ctx, filter.Pattern)
+	ftsQuery, err := capability.store.prepareMessageFTSQuery(ctx, store, filter.Pattern)
 	if err != nil {
 		return nil, err
 	}

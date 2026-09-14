@@ -420,5 +420,6 @@ The shared Bun paths also preserve upstream reasoning-effort metadata,
 archive-content policies, and tool-result image retention. Restricted archives
 keep staged parsing but publish only projected rows and omit parser checkpoints.
 Data version 109 triggers the canonical timestamp rebuild and repairs copied
-version-106 orphaned and trashed messages. DuckDB mirror version 16 adds the
-reasoning-effort column to the canonical schema.
+orphaned and trashed messages from all earlier data versions, including 108.
+DuckDB mirror version 16 adds the reasoning-effort column to the canonical
+schema.

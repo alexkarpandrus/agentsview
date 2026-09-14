@@ -4427,6 +4427,16 @@ func (capability sqliteFullTextCapability) Available() bool {
 // HasCJKFTS reports whether the optional simple-tokenized message index is
 // loaded and queryable on this database connection.
 func (db *DB) HasCJKFTS() (available bool) {
+	_ = db.view(context.Background(), func(store bun.IDB) error {
+		available = db.hasCJKFTS(context.Background(), store)
+		return nil
+	})
+	return available
+}
+
+// hasCJKFTS uses the caller's guarded handle, including its pinned transaction.
+// Reacquiring the reader here can block behind reopen or exhaust the pool.
+func (db *DB) hasCJKFTS(ctx context.Context, store bun.IDB) (available bool) {
 	if !simpleFTSRuntimeConfig.available() {
 		return false
 	}
@@ -4438,7 +4448,7 @@ func (db *DB) HasCJKFTS() (available bool) {
 		}
 	}()
 	var storedFingerprint string
-	if err := db.getReader().QueryRow(
+	if err := store.QueryRowContext(ctx,
 		"SELECT CAST(value AS TEXT) FROM stats WHERE key = ?",
 		cjkFTSFingerprintStatsKey,
 	).Scan(&storedFingerprint); err != nil ||
@@ -4446,14 +4456,14 @@ func (db *DB) HasCJKFTS() (available bool) {
 		return false
 	}
 	var hasPendingSessions bool
-	if err := db.getReader().QueryRow(`
+	if err := store.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM messages_cjk_fts_pending_sessions LIMIT 1
 		)`,
 	).Scan(&hasPendingSessions); err != nil || hasPendingSessions {
 		return false
 	}
-	_, err := db.getReader().Exec(
+	_, err := store.ExecContext(ctx,
 		"SELECT 1 FROM messages_cjk_fts LIMIT 1",
 	)
 	return err == nil

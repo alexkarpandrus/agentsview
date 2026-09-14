@@ -162,12 +162,6 @@ func TestCJKFTSChineseSearch(t *testing.T) {
 	require.Len(t, phrase.Matches, 1)
 	assert.Equal(t, "chinese", phrase.Matches[0].SessionID)
 
-	expression, err := d.prepareMessageFTSQuery(
-		context.Background(), `"中文" OR "国法"`,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, `"中文" OR "国法"`, expression.match)
-
 	orQuery, err := d.SearchContent(context.Background(), ContentSearchFilter{
 		Pattern: `"中文" OR "国法"`,
 		Mode:    "fts",
@@ -514,8 +508,8 @@ func TestCJKFTSJiebaConfigurationSerializesWithQueries(t *testing.T) {
 					}
 					continue
 				}
-				if _, err := d.prepareMessageFTSQuery(
-					context.Background(), "并发中文搜索",
+				if _, err := d.Search(
+					context.Background(), SearchFilter{Query: "并发中文搜索", Limit: 10},
 				); err != nil {
 					errs <- err
 				}
