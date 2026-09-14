@@ -130,6 +130,12 @@ Both decisions are durable human states and are not reversed by later
 extraction-generation changes. This surface deliberately has no entry editing,
 bulk review, or undo action.
 
+Recall requires SQLite FTS5, which all standard builds include. The first
+writable open upgrades the previous review-state schema and converts any old
+FTS4 Recall search indexes to FTS5 in the same transaction. Entries and evidence
+are preserved; existing FTS5 indexes do not need rebuilding. This migration
+blocks startup until it finishes and does not run again on later opens.
+
 ## Vector and hybrid retrieval
 
 `recall query` and `recall brief` accept `--mode lexical`, `--mode vector`, or

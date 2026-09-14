@@ -106,6 +106,9 @@ func migrateRecallReviewStateConstraintLocked(
 	); err != nil {
 		return fmt.Errorf("swapping migrated recall entries: %w", err)
 	}
+	if err := migrateRecallSearchIndexesTx(ctx, tx); err != nil {
+		return err
+	}
 
 	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
@@ -124,6 +127,51 @@ func migrateRecallReviewStateConstraintLocked(
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing recall review migration: %w", err)
+	}
+	return nil
+}
+
+// The released review-state constraint also predates the FTS5 requirement.
+// Convert its old search indexes once while the archive migration is atomic;
+// existing FTS5 indexes keep their contents and preserved rowid associations.
+func migrateRecallSearchIndexesTx(ctx context.Context, tx *sql.Tx) error {
+	for _, index := range []struct {
+		table, triggerPrefix, schema string
+	}{
+		{"recall_entries_fts", "recall_entries", recallEntriesFTS},
+		{"recall_evidence_fts", "recall_evidence", recallEvidenceFTS},
+	} {
+		var ddl string
+		err := tx.QueryRowContext(ctx,
+			`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`,
+			index.table,
+		).Scan(&ddl)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // Normal initialization creates missing indexes.
+		}
+		if err != nil {
+			return fmt.Errorf("reading %s schema: %w", index.table, err)
+		}
+		if !strings.Contains(strings.ToLower(ddl), "using fts4") {
+			continue
+		}
+		// Only the derived index is replaced; entries and evidence stay intact.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			DROP TRIGGER IF EXISTS %[1]s_ai;
+			DROP TRIGGER IF EXISTS %[1]s_ad;
+			DROP TRIGGER IF EXISTS %[1]s_au;
+			DROP TABLE %[2]s;
+		`, index.triggerPrefix, index.table)); err != nil {
+			return fmt.Errorf("replacing %s: %w", index.table, err)
+		}
+		if _, err := tx.ExecContext(ctx, index.schema); err != nil {
+			return fmt.Errorf("creating %s with FTS5 (build with -tags fts5): %w", index.table, err)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+			"INSERT INTO %s(%s) VALUES('rebuild')", index.table, index.table,
+		)); err != nil {
+			return fmt.Errorf("rebuilding %s: %w", index.table, err)
+		}
 	}
 	return nil
 }
