@@ -335,7 +335,7 @@ func clineParseFile(
 		)
 	}
 	results, err := parseClineSessionWithTeammates(
-		src.Path, req.Source.ProjectHint, req.Machine, req.StoredSessionIDHints,
+		src.Path, req.Source.ProjectHint, req.Machine,
 	)
 	if err != nil {
 		return nil, nil, err

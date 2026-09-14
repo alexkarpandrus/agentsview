@@ -1382,7 +1382,7 @@ func TestParseClineSession_TeammateSubagents(t *testing.T) {
 	metaPath := filepath.Join(sessDir, "sess-parent.json")
 
 	// 1. Test parseClineSessionWithTeammates directly
-	results, err := parseClineSessionWithTeammates(metaPath, "teamproject", "local", nil)
+	results, err := parseClineSessionWithTeammates(metaPath, "teamproject", "local")
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 
@@ -1400,15 +1400,15 @@ func TestParseClineSession_TeammateSubagents(t *testing.T) {
 	assert.Equal(t, "Task", spawnCall.Category)
 
 	runCall := parent.Messages[3].ToolCalls[0]
-	assert.Equal(t, "cline:sess-parent__teammate__git-scout", runCall.SubagentSessionID)
+	assert.Equal(t, "cline:sess-parent__teamtask__git-scout__t1abc", runCall.SubagentSessionID)
 	assert.Equal(t, "Task", runCall.Category)
 	require.Len(t, runCall.ResultEvents, 1)
-	assert.Equal(t, "cline:sess-parent__teammate__git-scout", runCall.ResultEvents[0].SubagentSessionID)
+	assert.Equal(t, "cline:sess-parent__teamtask__git-scout__t1abc", runCall.ResultEvents[0].SubagentSessionID)
 	assert.Equal(t, "git-scout", runCall.ResultEvents[0].AgentID)
 
 	// Verify Child Subagent
 	child := results[1]
-	assert.Equal(t, "cline:sess-parent__teammate__git-scout", child.Session.ID)
+	assert.Equal(t, "cline:sess-parent__teamtask__git-scout__t1abc", child.Session.ID)
 	assert.Equal(t, "sess-parent__teamtask__git-scout__t1abc", child.Session.SourceSessionID)
 	assert.Equal(t, "cline:sess-parent", child.Session.ParentSessionID)
 	assert.Equal(t, RelSubagent, child.Session.RelationshipType)
@@ -1439,7 +1439,7 @@ func TestParseClineSession_TeammateSubagents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "cline:sess-parent", sess.ID)
 	assert.Empty(t, msgs[1].ToolCalls[0].SubagentSessionID)
-	assert.Equal(t, "cline:sess-parent__teammate__git-scout", msgs[3].ToolCalls[0].SubagentSessionID)
+	assert.Equal(t, "cline:sess-parent__teamtask__git-scout__t1abc", msgs[3].ToolCalls[0].SubagentSessionID)
 }
 
 func TestParseClineSession_AmbiguousTeammateRunsRemainUnlinked(t *testing.T) {
@@ -1476,7 +1476,7 @@ func TestParseClineSession_AmbiguousTeammateRunsRemainUnlinked(t *testing.T) {
 	}
 
 	results, err := parseClineSessionWithTeammates(
-		filepath.Join(sessDir, sessionID+".json"), "", "local", nil,
+		filepath.Join(sessDir, sessionID+".json"), "", "local",
 	)
 	require.NoError(t, err)
 	require.Len(t, results, 3)
@@ -1524,13 +1524,13 @@ func TestParseClineTeammates_SafetyValidationAndSymlinks(t *testing.T) {
 		defer os.Remove(symlinkPath)
 	}
 
-	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-safe.json"), "proj", "local", nil)
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-safe.json"), "proj", "local")
 	require.NoError(t, err)
 
 	// Only parent + the one valid subagent should be returned. All invalid names and symlinks skipped.
 	require.Len(t, results, 2)
 	assert.Equal(t, "cline:sess-safe", results[0].Session.ID)
-	assert.Equal(t, "cline:sess-safe__teammate__good-scout", results[1].Session.ID)
+	assert.Equal(t, "cline:sess-safe__teamtask__good-scout__ok", results[1].Session.ID)
 }
 
 func TestParseClineSession_MultiTurnUserInputCleaning(t *testing.T) {
@@ -1641,4 +1641,68 @@ func TestParseClineSession_MultiTurnUserInputCleaning(t *testing.T) {
 	assert.Equal(t, RoleAssistant, msgs[4].Role)
 	assert.Equal(t, 4, msgs[4].Ordinal)
 	assert.Equal(t, "Proceeding with execution.", msgs[4].Content)
+}
+
+// TestParseClineTeammates_OneSessionPerFile pins the rule that every teammate
+// transcript file is its own session. A continued run writes a second file that
+// repeats the first file's messages; both files stay separate sessions with the
+// IDs Cline wrote into them. A payload ID that belongs to a different parent is
+// ignored and the filename-derived ID is used instead.
+func TestParseClineTeammates_OneSessionPerFile(t *testing.T) {
+	dir := t.TempDir()
+	sessDir := filepath.Join(dir, "sess-runs")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessDir, "sess-runs.json"),
+		[]byte(`{"session_id":"sess-runs","cwd":"/workspace"}`), 0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessDir, "sess-runs.messages.json"),
+		[]byte(`{"messages":[
+			{"id":"p1","role":"assistant","content":[{"type":"tool_use","id":"run-1","name":"team_run_task","input":{"agentId":"worker"}}],"ts":1000},
+			{"id":"p2","role":"user","content":[{"type":"tool_result","tool_use_id":"run-1","content":"done"}],"ts":2000}
+		]}`), 0o644,
+	))
+
+	first := `{"sessionId":"sess-runs__teamtask__worker__aaa111","origin":{"subagent":"worker","parentThreadId":"sess-runs"},"messages":[
+		{"id":"m1","role":"user","content":[{"type":"text","text":"first task"}],"ts":1100},
+		{"id":"m2","role":"assistant","content":[{"type":"text","text":"done first"}],"ts":1200}
+	]}`
+	second := `{"sessionId":"sess-runs__teamtask__worker__bbb222","origin":{"subagent":"worker","parentThreadId":"sess-runs"},"messages":[
+		{"id":"m1","role":"user","content":[{"type":"text","text":"first task"}],"ts":1100},
+		{"id":"m2","role":"assistant","content":[{"type":"text","text":"done first"}],"ts":1200},
+		{"id":"m3","role":"user","content":[{"type":"text","text":"second task"}],"ts":1300},
+		{"id":"m4","role":"assistant","content":[{"type":"text","text":"done second"}],"ts":1400}
+	]}`
+	foreign := `{"sessionId":"other-parent__teamtask__scout__ccc333","origin":{"subagent":"scout"},"messages":[
+		{"id":"s1","role":"user","content":[{"type":"text","text":"scout"}],"ts":1500}
+	]}`
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "worker__aaa111.messages.json"), []byte(first), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "worker__bbb222.messages.json"), []byte(second), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "scout__ccc333.messages.json"), []byte(foreign), 0o644))
+
+	results, err := parseClineSessionWithTeammates(filepath.Join(sessDir, "sess-runs.json"), "", "local")
+	require.NoError(t, err)
+	require.Len(t, results, 4, "parent plus one session per teammate file")
+
+	byID := make(map[string]ParseResult)
+	for _, r := range results[1:] {
+		byID[r.Session.ID] = r
+	}
+	require.Contains(t, byID, "cline:sess-runs__teamtask__worker__aaa111")
+	require.Contains(t, byID, "cline:sess-runs__teamtask__worker__bbb222")
+	require.Contains(t, byID, "cline:sess-runs__teamtask__scout__ccc333")
+
+	assert.Equal(t, 2, byID["cline:sess-runs__teamtask__worker__aaa111"].Session.MessageCount)
+	assert.Equal(t, 4, byID["cline:sess-runs__teamtask__worker__bbb222"].Session.MessageCount)
+	assert.Equal(t, "other-parent__teamtask__scout__ccc333", byID["cline:sess-runs__teamtask__scout__ccc333"].Session.SourceSessionID)
+	for _, r := range results[1:] {
+		assert.Equal(t, "cline:sess-runs", r.Session.ParentSessionID)
+		assert.Equal(t, RelSubagent, r.Session.RelationshipType)
+	}
+
+	// Two worker files: the team_run_task call cannot pick one, so it stays unlinked.
+	require.Len(t, results[0].Messages, 2)
+	require.Len(t, results[0].Messages[0].ToolCalls, 1)
+	assert.Empty(t, results[0].Messages[0].ToolCalls[0].SubagentSessionID)
 }
