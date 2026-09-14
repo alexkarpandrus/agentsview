@@ -7883,6 +7883,8 @@ func TestProcessFileSkipCacheReparsesStaleCodexProject(t *testing.T) {
 		Path:    path,
 		Machine: "host",
 	})
+	defer res.releaseStaged()
+	defer res.retentionLease.Release()
 	require.NoError(t, res.err)
 	require.False(t, res.skip,
 		"remote skip cache must not hide stale generated roborev CI projects")
@@ -7941,6 +7943,8 @@ func TestProcessFileSkipCacheReparsesStaleCodexDataVersion(t *testing.T) {
 		Agent: parser.AgentCodex,
 		Path:  path,
 	})
+	defer res.releaseStaged()
+	defer res.retentionLease.Release()
 	require.NoError(t, res.err)
 	require.False(t, res.skip,
 		"skip cache must not hide stale parser data versions")
@@ -8347,6 +8351,8 @@ func TestProcessCodexAppendedStaleProjectDoesFullReparse(t *testing.T) {
 		Agent: parser.AgentCodex,
 		Path:  path,
 	})
+	defer res.releaseStaged()
+	defer res.retentionLease.Release()
 	require.NoError(t, res.err)
 	require.Nil(t, res.incremental,
 		"stale project metadata must force full parse even when file appended")
@@ -8442,6 +8448,8 @@ func TestProcessCodexAppendedStaleProjectCarriesForceReplace(t *testing.T) {
 		Agent: parser.AgentCodex,
 		Path:  path,
 	})
+	defer res.releaseStaged()
+	defer res.retentionLease.Release()
 	require.NoError(t, res.err)
 	require.Nil(t, res.incremental,
 		"stale project metadata must force full parse even when file appended")

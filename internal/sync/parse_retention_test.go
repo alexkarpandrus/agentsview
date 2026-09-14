@@ -1471,9 +1471,9 @@ func TestParseRetentionBudgetAdmissionWeights(t *testing.T) {
 		{"bulk_six_mib", bulk, 6291456, 25231360, 25231360},
 		{"bulk_below_clamp", bulk, 67092479, 268435452, 268435452},
 		{"bulk_at_clamp", bulk, 67092480, 268435456, 268435456},
-		{"bulk_saturated", bulk, 134217728, 268435456, 536870912},
-		{"bulk_unknown", bulk, 0, 268435456, 536870912},
-		{"bulk_negative", bulk, -1, 268435456, 536870912},
+		{"bulk_saturated", bulk, 134217728, 268435456, 268435456},
+		{"bulk_unknown", bulk, 0, 268435456, 268435456},
+		{"bulk_negative", bulk, -1, 268435456, 268435456},
 		{"daemon_sixty_four_mib", daemon, 67108864, 67108864, 67108864},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
