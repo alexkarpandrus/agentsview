@@ -6672,17 +6672,59 @@ func (e *Engine) tombstoneMissingWatchSourcesLocked(
 				"%s provider reconciliation scopes: %w", plan.agent, plan.err,
 			)
 		}
+		var provider parser.Provider
+		if factory := e.providerFactories[plan.agent]; factory != nil {
+			provider = factory.NewProvider(parser.ProviderConfig{
+				Roots:          e.agentDirs[plan.agent],
+				Machine:        e.machine,
+				SourceMachines: e.sourceMachines[plan.agent],
+				PathRewriter:   e.pathRewriter,
+			})
+		}
 		for _, scope := range plan.plan.Scopes {
+			proofScopes := scope.PhysicalProofScopes
+			if resolver, ok := provider.(parser.StoredSourceHintScopeProvider); ok {
+				var hintScopes []parser.StoredSourceHintScope
+				for _, retryRoot := range scope.RetryRoots {
+					hintScopes = append(
+						hintScopes,
+						resolver.StoredSourceHintScopes(parser.ChangedPathRequest{
+							Path: retryRoot,
+						})...,
+					)
+				}
+				if len(hintScopes) > 0 {
+					proofScopes = deduplicateStoredSourceHintScopes(hintScopes)
+				}
+			}
 			scopes = append(scopes, reconciliationProviderScope{
 				agent:                      plan.agent,
 				roots:                      scope.RetryRoots,
-				proofScopes:                scope.PhysicalProofScopes,
+				proofScopes:                proofScopes,
 				coverageIdentities:         scope.CoverageIdentities,
 				requiredCoverageIdentities: plan.plan.RequiredCoverageIdentities,
 			})
 		}
 	}
 	return e.tombstoneMissingWatchSourceScopesLocked(ctx, scopes, spool)
+}
+
+func deduplicateStoredSourceHintScopes(
+	scopes []parser.StoredSourceHintScope,
+) []parser.StoredSourceHintScope {
+	if len(scopes) <= 1 {
+		return scopes
+	}
+	seen := make(map[parser.StoredSourceHintScope]struct{}, len(scopes))
+	out := make([]parser.StoredSourceHintScope, 0, len(scopes))
+	for _, scope := range scopes {
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		out = append(out, scope)
+	}
+	return out
 }
 
 // reconciliationCoverageComplete reports whether the scopes completed for one
@@ -6836,6 +6878,15 @@ func (e *Engine) tombstoneMissingWatchSourceScopesLocked(
 						if !ok {
 							_, statErr := e.lstatSource(statPath)
 							missing = os.IsNotExist(statErr)
+							if !missing && agent == parser.AgentCline {
+								dir := filepath.Dir(statPath)
+								sessionID := filepath.Base(dir)
+								metaPath := filepath.Join(dir, sessionID+".json")
+								if metaPath != statPath {
+									_, metaErr := e.lstatSource(metaPath)
+									missing = os.IsNotExist(metaErr)
+								}
+							}
 							missingByPath[statPath] = missing
 						}
 						if !missing {

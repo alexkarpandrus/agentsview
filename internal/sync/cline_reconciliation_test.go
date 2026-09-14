@@ -86,6 +86,70 @@ func TestClineReconciliation_DeletedTeammateLifecycle(t *testing.T) {
 	assert.Nil(t, revived.DeletedAt)
 }
 
+// TestClineReconciliation_DeletedMetadataLifecycle verifies that deleting the
+// owning metadata file still reaches source-missing reconciliation for the
+// parent and every teammate result in its session directory.
+func TestClineReconciliation_DeletedMetadataLifecycle(t *testing.T) {
+	root := t.TempDir()
+	sessDir := filepath.Join(root, "data", "sessions", "sess-metadata")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+
+	metaPath := filepath.Join(sessDir, "sess-metadata.json")
+	metaJSON := `{"session_id":"sess-metadata","cwd":"/workspace","started_at":"2026-09-12T10:00:00Z"}`
+	require.NoError(t, os.WriteFile(metaPath, []byte(metaJSON), 0o644))
+
+	msgPath := filepath.Join(sessDir, "sess-metadata.messages.json")
+	msgJSON := `{"version":1,"messages":[{"id":"m1","role":"user","content":[{"type":"text","text":"start"}],"ts":1000}]}`
+	require.NoError(t, os.WriteFile(msgPath, []byte(msgJSON), 0o644))
+
+	tmPath := filepath.Join(sessDir, "scout__t1.messages.json")
+	tmJSON := `{"version":1,"sessionId":"sess-metadata__teamtask__scout__t1","origin":{"subagent":"scout"},"messages":[{"id":"tm1","role":"user","content":[{"type":"text","text":"scout task"}],"ts":1050}]}`
+	require.NoError(t, os.WriteFile(tmPath, []byte(tmJSON), 0o644))
+
+	database := dbtest.OpenTestDB(t)
+	engine := NewEngine(database, EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{
+			parser.AgentCline: {root},
+		},
+		Machine: "test-machine",
+	})
+	t.Cleanup(engine.Close)
+
+	first := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 2, first.Synced)
+
+	parentID := "cline:sess-metadata"
+	teammateID := "cline:sess-metadata__teammate__scout"
+	for _, id := range []string{parentID, teammateID} {
+		session, err := database.GetSessionFull(t.Context(), id)
+		require.NoError(t, err)
+		require.NotNil(t, session)
+		assert.Nil(t, session.SourceMissingAt)
+		assert.Nil(t, session.DeletedAt)
+	}
+
+	require.NoError(t, os.Remove(metaPath))
+	require.NoError(t, engine.SyncPathsContext(t.Context(), []string{metaPath}))
+
+	for _, id := range []string{parentID, teammateID} {
+		session, err := database.GetSessionFull(t.Context(), id)
+		require.NoError(t, err)
+		require.NotNil(t, session, "session %s should remain archived", id)
+		assertSourceMissingState(t, session)
+	}
+
+	require.NoError(t, os.WriteFile(metaPath, []byte(metaJSON), 0o644))
+	require.NoError(t, engine.SyncPathsContext(t.Context(), []string{metaPath}))
+
+	for _, id := range []string{parentID, teammateID} {
+		session, err := database.GetSessionFull(t.Context(), id)
+		require.NoError(t, err)
+		require.NotNil(t, session)
+		assert.Nil(t, session.SourceMissingAt)
+		assert.Nil(t, session.DeletedAt)
+	}
+}
+
 func TestClineReconciliation_ContinuationAppearsAfterRootRemoval(t *testing.T) {
 	root := t.TempDir()
 	sessDir := filepath.Join(root, "data", "sessions", "sess-late-continuation")

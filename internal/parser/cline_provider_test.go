@@ -96,11 +96,10 @@ func TestClineClassifyPath(t *testing.T) {
 			wantPath:     metaPath,
 		},
 		{
-			name:         "missing metadata file with allowMissing",
+			name:         "missing metadata file is not a source",
 			path:         filepath.Join(sessionsDir, "missing", "missing.json"),
 			allowMissing: true,
-			wantMatch:    true,
-			wantPath:     filepath.Join(sessionsDir, "missing", "missing.json"),
+			wantMatch:    false,
 		},
 		{
 			name:         "underscore dir skipped",
@@ -366,6 +365,13 @@ func TestClineStoredSourceHintScope(t *testing.T) {
 	tmPath := filepath.Join(sessDir, "worker__t1.messages.json")
 	require.NoError(t, os.WriteFile(tmPath, []byte(`{}`), 0o644))
 
+	deletedSessionID := "1789000000002_deleted"
+	deletedSessDir := filepath.Join(sessionsDir, deletedSessionID)
+	require.NoError(t, os.MkdirAll(deletedSessDir, 0o755))
+	deletedMetaPath := filepath.Join(deletedSessDir, deletedSessionID+".json")
+	require.NoError(t, os.WriteFile(deletedMetaPath, []byte(`{}`), 0o644))
+	require.NoError(t, os.Remove(deletedMetaPath))
+
 	provider, ok := NewProvider(AgentCline, ProviderConfig{Roots: []string{root}})
 	require.True(t, ok)
 	resolver, ok := provider.(StoredSourceHintScopeProvider)
@@ -382,6 +388,12 @@ func TestClineStoredSourceHintScope(t *testing.T) {
 			path:      metaPath,
 			wantScope: true,
 			wantPath:  sessDir,
+		},
+		{
+			name:      "deleted metadata path resolves to session directory",
+			path:      deletedMetaPath,
+			wantScope: true,
+			wantPath:  deletedSessDir,
 		},
 		{
 			name:      "companion messages path resolves to session directory",

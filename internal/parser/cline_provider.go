@@ -146,11 +146,13 @@ func clineRegularFileInfo(path string, allowMissing bool) (os.FileInfo, error) {
 }
 
 // clineSessionDirectoryWithinRoot validates the directory component that
-// owns a Cline session. The lexical check prevents traversal, Lstat rejects a
-// symlink at the session-directory boundary, and the resolved-path check
-// prevents an intermediate symlink (for example data/) from escaping the
-// configured Cline root. A missing session directory remains valid only for
-// changed-path tombstone classification.
+// owns a Cline session. The lexical check prevents traversal, and Lstat on
+// every component from the configured root through the session directory
+// rejects symlinks before any Cline file is read. Walking the components also
+// avoids relying on EvalSymlinks, which can fail with Access Denied on Windows
+// even for ordinary directories when symlink privileges are unavailable.
+// A missing session directory remains valid only for changed-path tombstone
+// classification.
 func clineSessionDirectoryWithinRoot(
 	root, sessionDir string, allowMissing bool,
 ) bool {
@@ -161,23 +163,25 @@ func clineSessionDirectoryWithinRoot(
 		return false
 	}
 
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return allowMissing && os.IsNotExist(err)
-	}
-
-	info, err := os.Lstat(sessionDir)
-	if os.IsNotExist(err) {
-		return allowMissing
-	}
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	rel, err := filepath.Rel(root, sessionDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false
 	}
-	resolvedSessionDir, err := filepath.EvalSymlinks(sessionDir)
-	if err != nil {
-		return false
+	current := root
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return allowMissing && filepath.Clean(current) == sessionDir
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return false
+		}
 	}
-	return isWithinRoot(resolvedRoot, resolvedSessionDir)
+	return true
 }
 
 func clineWatchRoots(roots []string) []WatchRoot {
@@ -197,53 +201,60 @@ func clineWatchRoots(roots []string) []WatchRoot {
 func clineClassifyPath(
 	root, path string, allowMissing bool,
 ) (singleFileMatch, bool) {
+	sessionDir, sessionID, filename, ok := clineSessionPathParts(
+		root, path, allowMissing,
+	)
+	if !ok || !isClineSessionFileName(sessionID, filename) {
+		return singleFileMatch{}, false
+	}
+
+	metaPath := filepath.Join(sessionDir, sessionID+".json")
+	info, err := clineRegularFileInfo(metaPath, allowMissing)
+	if err == nil && info != nil {
+		return singleFileMatch{Path: metaPath}, true
+	}
+	return singleFileMatch{}, false
+}
+
+func clineSessionPathParts(
+	root, path string, allowMissing bool,
+) (sessionDir, sessionID, filename string, ok bool) {
 	root = filepath.Clean(root)
 	path = filepath.Clean(path)
 	sessionsDir := clineResolveSessionsDir(root)
 
 	rel, err := filepath.Rel(sessionsDir, path)
 	if err != nil || strings.HasPrefix(rel, "..") {
-		return singleFileMatch{}, false
+		return "", "", "", false
 	}
-
 	parts := strings.Split(rel, string(filepath.Separator))
 	if len(parts) != 2 {
-		return singleFileMatch{}, false
+		return "", "", "", false
 	}
 
-	sessionID := parts[0]
-	filename := parts[1]
-
+	sessionID = parts[0]
+	filename = parts[1]
 	if !ValidClineSessionID(sessionID) {
-		return singleFileMatch{}, false
+		return "", "", "", false
 	}
-	sessionDir := filepath.Join(sessionsDir, sessionID)
+	sessionDir = filepath.Join(sessionsDir, sessionID)
 	if !clineSessionDirectoryWithinRoot(root, sessionDir, allowMissing) {
-		return singleFileMatch{}, false
-	}
-
-	if filename != sessionID+".json" && filename != sessionID+".messages.json" && !IsClineTeammateMessagesFile(sessionID, filename) {
-		return singleFileMatch{}, false
+		return "", "", "", false
 	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return singleFileMatch{}, false
+			return "", "", "", false
 		}
 	} else if !os.IsNotExist(err) {
-		return singleFileMatch{}, false
+		return "", "", "", false
 	}
+	return sessionDir, sessionID, filename, true
+}
 
-	metaPath := filepath.Join(sessionsDir, sessionID, sessionID+".json")
-	if allowMissing {
-		if _, err := clineRegularFileInfo(metaPath, true); err != nil {
-			return singleFileMatch{}, false
-		}
-		return singleFileMatch{Path: metaPath}, true
-	}
-	if _, err := clineRegularFileInfo(metaPath, false); err == nil {
-		return singleFileMatch{Path: metaPath}, true
-	}
-	return singleFileMatch{}, false
+func isClineSessionFileName(sessionID, filename string) bool {
+	return filename == sessionID+".json" ||
+		filename == sessionID+".messages.json" ||
+		IsClineTeammateMessagesFile(sessionID, filename)
 }
 
 // clineStoredSourceHintScope is the single-file stored-source-hint-scope hook
@@ -253,12 +264,12 @@ func clineClassifyPath(
 // paths are ordinary descendants of the session directory, not path#member
 // virtual paths, so IncludeVirtualMembers stays false.
 func clineStoredSourceHintScope(root, path string) (StoredSourceHintScope, bool) {
-	match, ok := clineClassifyPath(root, path, true)
-	if !ok {
+	sessionDir, sessionID, filename, ok := clineSessionPathParts(root, path, true)
+	if !ok || !isClineSessionFileName(sessionID, filename) {
 		return StoredSourceHintScope{}, false
 	}
 	return StoredSourceHintScope{
-		Path:                  filepath.Dir(filepath.Clean(match.Path)),
+		Path:                  sessionDir,
 		IncludeVirtualMembers: false,
 	}, true
 }
