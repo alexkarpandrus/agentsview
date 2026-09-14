@@ -81,8 +81,7 @@ test.describe("Data mode project reclassification", () => {
       const request = response.request();
       return (
         request.method() === "POST" &&
-        new URL(response.url()).pathname ===
-          "/api/v1/settings/worktree-mappings/reclassify"
+        new URL(response.url()).pathname === "/api/v1/settings/worktree-mappings/reclassify"
       );
     });
     const inventoryResponse = page.waitForResponse(
