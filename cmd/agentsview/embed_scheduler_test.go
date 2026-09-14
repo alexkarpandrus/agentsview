@@ -242,36 +242,44 @@ func TestEmbedSchedulerBuildsHoldIdleWorkLease(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mgr := &blockingEmbedManager{
-				started: make(chan struct{}),
-				release: make(chan struct{}),
-			}
-			idled := make(chan struct{})
-			tracker := server.NewIdleTracker(50*time.Millisecond, func() { close(idled) })
-			s := newEmbedScheduler(
-				mgr, tt.debounce, tt.backstop, false, tracker,
-			)
-			ctx := t.Context()
-			go tracker.Run(ctx)
-			go s.Run(ctx)
-			defer s.Stop()
-			defer mgr.releaseOnce()
+			// Keep host scheduling delays from letting idle shutdown beat the
+			// first build. Both timers advance only when the goroutines block.
+			synctest.Test(t, func(t *testing.T) {
+				mgr := &blockingEmbedManager{
+					started: make(chan struct{}),
+					release: make(chan struct{}),
+				}
+				idled := make(chan struct{})
+				tracker := server.NewIdleTracker(50*time.Millisecond, func() { close(idled) })
+				s := newEmbedScheduler(
+					mgr, tt.debounce, tt.backstop, false, tracker,
+				)
+				ctx := t.Context()
+				go tracker.Run(ctx)
+				go s.Run(ctx)
+				defer s.Stop()
+				defer mgr.releaseOnce()
 
-			if tt.notify {
-				s.Notify()
-			}
-			<-mgr.started
-			select {
-			case <-idled:
-				require.Fail(t, "daemon idled while an embedding build was in flight")
-			case <-time.After(200 * time.Millisecond):
-			}
-			mgr.releaseOnce()
-			select {
-			case <-idled:
-			case <-time.After(2 * time.Second):
-				require.Fail(t, "daemon never idled after the embedding build completed")
-			}
+				if tt.notify {
+					s.Notify()
+				}
+				select {
+				case <-mgr.started:
+				case <-time.After(time.Second):
+					require.FailNow(t, "embedding build never started")
+				}
+				select {
+				case <-idled:
+					require.Fail(t, "daemon idled while an embedding build was in flight")
+				case <-time.After(200 * time.Millisecond):
+				}
+				mgr.releaseOnce()
+				select {
+				case <-idled:
+				case <-time.After(2 * time.Second):
+					require.Fail(t, "daemon never idled after the embedding build completed")
+				}
+			})
 		})
 	}
 }
