@@ -11892,30 +11892,13 @@ func (e *Engine) processProviderFile(
 			ctx, stagedConfig, source, fingerprint, stagedSink,
 		)
 	} else {
-		// Cline session-directory parses receive exact-path identity hints from
-		// the active rows under the session-directory ownership scope, so
-		// established chains keep their persisted non-positional IDs and legacy
-		// positional __runN IDs migrate through the source-missing path.
-		var storedSessionIDHints map[string]string
-		if file.Agent == parser.AgentCline {
-			var hintsErr error
-			storedSessionIDHints, hintsErr = e.clineStoredSessionIDHints(
-				ctx, provider, source,
-			)
-			if hintsErr != nil {
-				err = hintsErr
-			}
-		}
-		if err == nil {
-			outcome, err = provider.Parse(ctx, parser.ParseRequest{
-				Source:               source,
-				Fingerprint:          fingerprint,
-				Machine:              machine,
-				ForceParse:           e.forceParseRequested(file),
-				StoredPathResolver:   e.storedPathResolver,
-				StoredSessionIDHints: storedSessionIDHints,
-			})
-		}
+		outcome, err = provider.Parse(ctx, parser.ParseRequest{
+			Source:             source,
+			Fingerprint:        fingerprint,
+			Machine:            machine,
+			ForceParse:         e.forceParseRequested(file),
+			StoredPathResolver: e.storedPathResolver,
+		})
 	}
 	if err != nil {
 		if stagedSink != nil {
@@ -12500,72 +12483,6 @@ func (e *Engine) providerSourceSessionOwnershipsForForceReplace(
 		}
 	}
 	return members, nil
-}
-
-// clineStoredSessionIDHints builds the stored-path identity hints for a Cline
-// session-directory parse: stored source File.Path to the full session ID the
-// active row owns. Hints come only from active rows under the
-// session-directory ownership scope, and an exact path contributes only when
-// exactly one active session owns it. Stored paths are mapped back to their
-// physical form so the parser can match them against the files it actually
-// read.
-func (e *Engine) clineStoredSessionIDHints(
-	ctx context.Context,
-	provider parser.Provider,
-	source parser.SourceRef,
-) (map[string]string, error) {
-	agent := provider.Definition().Type
-	root := ""
-	for _, candidate := range []string{source.DisplayPath, source.FingerprintKey, source.Key} {
-		if candidate != "" {
-			root = candidate
-			break
-		}
-	}
-	if root == "" {
-		return nil, nil
-	}
-	scopes := []parser.StoredSourceHintScope{{Path: root}}
-	if resolver, ok := provider.(parser.StoredSourceHintScopeProvider); ok {
-		if resolved := resolver.StoredSourceHintScopes(
-			parser.ChangedPathRequest{Path: root},
-		); len(resolved) > 0 {
-			scopes = resolved
-		}
-	}
-	if e.pathRewriter != nil {
-		for i := range scopes {
-			scopes[i].Path = e.pathRewriter(scopes[i].Path)
-		}
-	}
-	storedPaths, err := e.db.ListStoredSourcePathHints(
-		string(agent), storedSourceDBHintScopes(scopes),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list cline stored session-id hints: %w", err)
-	}
-	hints := make(map[string]string)
-	for _, storedPath := range storedPaths {
-		ids, err := e.db.ListSessionIDsByFilePath(storedPath, string(agent))
-		if err != nil {
-			return nil, fmt.Errorf(
-				"list cline stored session-id hint for %s: %w", storedPath, err,
-			)
-		}
-		if len(ids) != 1 {
-			continue
-		}
-		keyPath := storedPath
-		if e.storedPathResolver != nil {
-			physical, ok := e.storedPathResolver(storedPath)
-			if !ok {
-				continue
-			}
-			keyPath = physical
-		}
-		hints[keyPath] = ids[0]
-	}
-	return hints, nil
 }
 
 func (e *Engine) providerSourceMissingSessionOwnershipsForCompleteResultWithPreserved(
