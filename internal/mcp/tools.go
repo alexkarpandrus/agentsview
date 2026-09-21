@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -578,7 +579,7 @@ type searchContentIn struct {
 	CurrentSessionID string `json:"current_session_id,omitempty" jsonschema:"Exclude this exact full stored session ID instead of applying the recent-activity heuristic."`
 	DateFrom         string `json:"date_from,omitempty" jsonschema:"Only sessions on or after this date (YYYY-MM-DD)."`
 	DateTo           string `json:"date_to,omitempty" jsonschema:"Only sessions on or before this date (YYYY-MM-DD)."`
-	Limit            int    `json:"limit,omitempty" jsonschema:"Max matches, default 10, range 1-50."`
+	Limit            int    `json:"limit,omitempty" jsonschema:"Max matches, default 10, max 50."`
 	Cursor           int    `json:"cursor,omitempty" jsonschema:"Pagination cursor from a previous next_cursor."`
 	IncludeActive    bool   `json:"include_active,omitempty" jsonschema:"Include matches from sessions active in the last 10 minutes. Default false: the conversation you are in right now is also recorded, so without this exclusion you would find yourself."`
 	IncludeOneShot   bool   `json:"include_one_shot,omitempty" jsonschema:"Include one-shot sessions. Default false."`
@@ -632,26 +633,18 @@ type contentMatch struct {
 }
 
 type searchContentOut struct {
-	Matches            []contentMatch              `json:"matches"`
-	NextCursor         *int                        `json:"next_cursor,omitempty"`
-	ExcludedActive     int                         `json:"excluded_active,omitempty"`
-	RequestedMode      string                      `json:"requested_mode"`
-	EffectiveMode      string                      `json:"effective_mode"`
-	AppliedFilters     searchContentAppliedFilters `json:"applied_filters"`
-	Exclusions         searchContentExclusions     `json:"exclusions"`
-	CandidateTruncated bool                        `json:"candidate_truncated"`
+	Matches        []contentMatch `json:"matches"`
+	NextCursor     *int           `json:"next_cursor,omitempty"`
+	ExcludedActive int            `json:"excluded_active,omitempty"`
+	// EffectiveMode and EffectiveScope report the defaults the search
+	// resolved, which the caller cannot see in its own request.
+	EffectiveMode  string                  `json:"effective_mode"`
+	EffectiveScope string                  `json:"effective_scope,omitempty"`
+	Exclusions     searchContentExclusions `json:"exclusions"`
 }
 
-type searchContentAppliedFilters struct {
-	Project   string `json:"project,omitempty"`
-	Agent     string `json:"agent,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	GitBranch string `json:"git_branch,omitempty"`
-	DateFrom  string `json:"date_from,omitempty"`
-	DateTo    string `json:"date_to,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-}
-
+// searchContentExclusions reports which default exclusions applied, so an
+// empty result can be told apart from one the defaults hid.
 type searchContentExclusions struct {
 	CurrentSessionID string `json:"current_session_id,omitempty"`
 	RecentActive     bool   `json:"recent_active"`
@@ -659,17 +652,7 @@ type searchContentExclusions struct {
 	Automated        bool   `json:"automated"`
 }
 
-func recallSearchLimit(requested int) (int, error) {
-	if requested == 0 {
-		return defaultSearchLimit, nil
-	}
-	if requested < 1 || requested > 50 {
-		return 0, errors.New("limit must be between 1 and 50")
-	}
-	return requested, nil
-}
-
-func validateRecallSearchDates(from, to string) error {
+func validateSearchDates(from, to string) error {
 	for _, date := range []string{from, to} {
 		if date == "" {
 			continue
@@ -687,15 +670,10 @@ func validateRecallSearchDates(from, to string) error {
 func (t *toolset) searchContent(
 	ctx context.Context, _ *mcp.CallToolRequest, in searchContentIn,
 ) (*mcp.CallToolResult, searchContentOut, error) {
-	// Scope has unit-level meaning only for semantic, hybrid, and terms.
-	if in.Scope != "" && in.Mode != "semantic" && in.Mode != "hybrid" && in.Mode != "terms" {
-		return nil, searchContentOut{}, errors.New("scope is only supported for semantic, hybrid, and terms search modes")
+	if in.Scope != "" && !db.ContentSearchModeSupportsScope(in.Mode) {
+		return nil, searchContentOut{}, errors.New(db.ContentSearchScopeUnsupportedMsg)
 	}
-	limit, err := recallSearchLimit(in.Limit)
-	if err != nil {
-		return nil, searchContentOut{}, err
-	}
-	if err := validateRecallSearchDates(in.DateFrom, in.DateTo); err != nil {
+	if err := validateSearchDates(in.DateFrom, in.DateTo); err != nil {
 		return nil, searchContentOut{}, err
 	}
 	excludeSessions := db.NormalizeExcludeSessionIDs([]string{in.CurrentSessionID})
@@ -709,7 +687,7 @@ func (t *toolset) searchContent(
 		GitBranchExact:    in.GitBranch,
 		DateFrom:          in.DateFrom,
 		DateTo:            in.DateTo,
-		Limit:             limit,
+		Limit:             clampLimit(in.Limit, defaultSearchLimit, maxContentSearchLimit),
 		Cursor:            in.Cursor,
 		Context:           in.Context,
 		IncludeOneShot:    in.IncludeOneShot,
@@ -727,28 +705,17 @@ func (t *toolset) searchContent(
 	// back to started_at) like search_sessions does -- not by the match
 	// timestamp. Activity is looked up once per session and cached.
 	activity := make(map[string]string, len(res.Matches))
-	effectiveMode := in.Mode
-	if effectiveMode == "" {
-		effectiveMode = "substring"
-	}
-	effectiveScope := in.Scope
-	if effectiveScope == "" && (effectiveMode == "semantic" || effectiveMode == "hybrid" || effectiveMode == "terms") {
-		effectiveScope = "all"
-	}
 	out := searchContentOut{
 		Matches:       make([]contentMatch, 0, len(res.Matches)),
-		RequestedMode: in.Mode,
-		EffectiveMode: effectiveMode,
-		AppliedFilters: searchContentAppliedFilters{
-			Project: in.Project, Agent: in.Agent, SessionID: in.SessionID,
-			GitBranch: in.GitBranch, DateFrom: in.DateFrom, DateTo: in.DateTo,
-			Scope: effectiveScope,
-		},
+		EffectiveMode: cmp.Or(in.Mode, "substring"),
 		Exclusions: searchContentExclusions{
 			CurrentSessionID: in.CurrentSessionID,
 			RecentActive:     in.CurrentSessionID == "" && !in.IncludeActive,
 			OneShot:          !in.IncludeOneShot, Automated: !in.IncludeAutomated,
 		},
+	}
+	if db.ContentSearchModeSupportsScope(in.Mode) {
+		out.EffectiveScope = cmp.Or(in.Scope, "all")
 	}
 	for _, m := range res.Matches {
 		if in.CurrentSessionID == "" && !in.IncludeActive {
@@ -777,7 +744,6 @@ func (t *toolset) searchContent(
 	if res.NextCursor > 0 && len(res.Matches) > 0 {
 		nc := res.NextCursor
 		out.NextCursor = &nc
-		out.CandidateTruncated = true
 	}
 	return nil, out, nil
 }

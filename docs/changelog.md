@@ -13,7 +13,7 @@ The latest published release is
 - Agents can require several literal terms within one user/assistant exchange
   when searching conversation history through MCP. Exact session, branch, and
   current-session filters narrow recall before the result limit, and each
-  response reports the search mode, filters, exclusions, and truncation.
+  response reports the effective search mode, scope, and default exclusions.
 
 ## 0.44.0
 

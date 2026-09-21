@@ -252,37 +252,15 @@ func (s *Store) SearchContent(ctx context.Context, f db.ContentSearchFilter) (db
 	if err != nil {
 		return db.ContentSearchPage{}, err
 	}
-	page := db.ContentSearchPage{Matches: matches}
-	if len(matches) > f.Limit {
-		page.Matches = matches[:f.Limit]
-		page.NextCursor = f.Cursor + f.Limit
-	}
+	page := f.Page(matches)
 	if err := s.deriveLexicalUnits(ctx, page.Matches); err != nil {
 		return db.ContentSearchPage{}, err
 	}
 	return page, nil
 }
 
-func contentSessionFilter(f db.ContentSearchFilter) db.SessionFilter {
-	return db.SessionFilter{
-		Project: f.Project, ExcludeProject: f.ExcludeProject,
-		Machine: f.Machine, GitBranch: f.GitBranch, Agent: f.Agent,
-		SessionID: f.SessionID, GitBranchExact: f.GitBranchExact,
-		Date: f.Date, DateFrom: f.DateFrom, DateTo: f.DateTo,
-		Timezone:         f.Timezone,
-		ActiveSince:      f.ActiveSince,
-		ExcludeOneShot:   !f.IncludeOneShot,
-		ExcludeAutomated: !f.IncludeAutomated,
-		IncludeChildren:  f.IncludeChildren,
-	}
-}
-
 func contentScope(f db.ContentSearchFilter) (string, []any) {
-	sessionFilter := contentSessionFilter(f)
-	scopeWhere, scopeArgs := db.BuildSessionFilterSQL(sessionFilter, db.ClickHouseQueryDialect())
-	if f.SessionID != "" {
-		scopeWhere, scopeArgs = db.BuildSessionBaseFilterSQL(sessionFilter, db.ClickHouseQueryDialect())
-	}
+	scopeWhere, scopeArgs := db.BuildContentScopeSQL(f, db.ClickHouseQueryDialect())
 	return db.AppendExcludeSessionIDs(scopeWhere, scopeArgs, "id", f.ExcludeSessionIDs)
 }
 

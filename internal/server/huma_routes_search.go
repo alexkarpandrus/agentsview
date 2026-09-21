@@ -113,9 +113,9 @@ func (s *Server) humaSearchContent(
 		return nil, apiError(http.StatusForbidden,
 			"semantic and hybrid search require "+service.SemanticSearchIntentHeader)
 	}
-	if in.Scope != "" && !requiresSemanticSearchIntent(in.Mode) && in.Mode != "terms" {
+	if in.Scope != "" && !db.ContentSearchModeSupportsScope(string(in.Mode)) {
 		return nil, apiError(http.StatusBadRequest,
-			"scope is only supported for semantic, hybrid, and terms search modes")
+			db.ContentSearchScopeUnsupportedMsg)
 	}
 	var sources []string
 	if in.In != "" {

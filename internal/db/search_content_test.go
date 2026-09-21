@@ -412,6 +412,54 @@ func TestSearchContentTermsAcrossExchange(t *testing.T) {
 	assert.Empty(t, missing.Matches)
 }
 
+func TestSearchContentTermsRequiresOneExchange(t *testing.T) {
+	d := testDB(t)
+	insertSession(t, d, "terms-split", "proj", func(s *Session) {
+		s.UserMessageCount = 2
+	})
+	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "terms-split", []Message{
+		{SessionID: "terms-split", Ordinal: 0, Role: "user", Content: "first mentions alpha"},
+		{SessionID: "terms-split", Ordinal: 1, Role: "assistant", Content: "plain reply"},
+		{SessionID: "terms-split", Ordinal: 2, Role: "user", Content: "second mentions beta"},
+	}))
+
+	got, err := d.SearchContent(t.Context(), ContentSearchFilter{
+		Pattern: "alpha beta", Mode: "terms", Limit: 50, IncludeOneShot: true,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, got.Matches,
+		"terms in different exchanges of one session must not match")
+}
+
+func TestSearchContentTermsSnippetStaysBoundedForDistantTerms(t *testing.T) {
+	d := testDB(t)
+	insertSession(t, d, "terms-long", "proj", func(s *Session) {
+		s.UserMessageCount = 2
+	})
+	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "terms-long", []Message{
+		{
+			SessionID: "terms-long", Ordinal: 0, Role: "user",
+			Content: "alpha " + strings.Repeat("filler ", 400),
+		},
+		{
+			SessionID: "terms-long", Ordinal: 1, Role: "assistant",
+			Content: strings.Repeat("padding ", 400) + "beta",
+		},
+	}))
+
+	got, err := d.SearchContent(t.Context(), ContentSearchFilter{
+		Pattern: "alpha beta", Mode: "terms", Limit: 50, IncludeOneShot: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Matches, 1)
+	snippet := got.Matches[0].Snippet
+	assert.True(t, strings.HasPrefix(snippet, "alpha filler"), snippet)
+	assert.True(t, strings.HasSuffix(snippet, "padding beta"), snippet)
+	assert.Contains(t, snippet, " ... ")
+	// Two windows of at most 60 bytes of context per side, one separator.
+	assert.LessOrEqual(t, len(snippet), 260)
+}
+
 func TestSearchContentTermsScopeAndStablePaging(t *testing.T) {
 	d := testDB(t)
 	for _, session := range []struct {

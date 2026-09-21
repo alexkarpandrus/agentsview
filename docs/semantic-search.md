@@ -691,9 +691,10 @@ PostgreSQL session scope as semantic and hybrid retrieval.
 For a recall request from a known running conversation, pass its full ID as
 `current_session_id`. This excludes that session before the limit and disables
 the broader ten-minute activity guard, so an unrelated recent session remains
-searchable. Limits default to 10; values outside 1-50 are rejected. Responses
-state the effective mode, applied filters and exclusions, and whether another
-candidate page exists.
+searchable. Limits default to 10 and go up to 50; a value outside that range
+falls back to the default. Responses state the effective mode and scope and
+which default exclusions applied; `next_cursor` is present when another page
+exists.
 
 ### Inline context: `--context N`
 
@@ -752,7 +753,7 @@ of `ordinal_range` to read the whole stretch.
 | Only a building generation exists                                                                       | same message, plus `: index is building: N% complete`                                                                                                        |
 | Active generation's fingerprint no longer matches config (model, dimension, or chunking changed)        | same message, plus `: index is stale (embedding config changed): run 'agentsview embeddings build --full-rebuild'`                                           |
 | Index was built by an incompatible agentsview version (mirror schema mismatch)                          | same message, plus `` : vector index was built by an incompatible version: run `agentsview embeddings build` ``                                              |
-| `--scope` with a lexical mode (or without `--semantic`/`--hybrid`)                                      | CLI/HTTP: `scope is only supported for semantic and hybrid search modes`; MCP also supports scope with `terms`                                                |
+| `--scope` with a lexical mode (or without `--semantic`/`--hybrid`)                                      | CLI/HTTP: `scope is only supported for semantic and hybrid search modes`; MCP also supports scope with `terms`                                               |
 | Embeddings endpoint unreachable or timed out                                                            | `[vector.embeddings] request: ...` (the underlying transport error)                                                                                          |
 | Embeddings endpoint returned non-200                                                                    | `[vector.embeddings] status <code>: <body>`                                                                                                                  |
 | Embeddings endpoint returned a non-finite or zero-norm vector                                           | `[vector.embeddings] invalid embedding at index <n>: ...`; correct the endpoint/cache configuration, then run `agentsview embeddings build --repair-invalid` |

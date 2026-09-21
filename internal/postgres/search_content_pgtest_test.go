@@ -762,6 +762,47 @@ func TestPGSearchContentTermsAcrossExchangeAndLiterals(t *testing.T) {
 	assert.Empty(t, missing.Matches)
 }
 
+func TestPGSearchContentTermsRequiresOneExchange(t *testing.T) {
+	store := setupContentSearch(t)
+	insertCSSession(t, store, "cs-terms-split", "proj", "claude",
+		"2026-05-01T10:00:00Z", "2026-05-01T10:30:00Z")
+	insertCSMessage(t, store, "cs-terms-split", 0, "user",
+		"first mentions alpha", "2026-05-01T10:00:00Z", false)
+	insertCSMessage(t, store, "cs-terms-split", 1, "assistant",
+		"plain reply", "2026-05-01T10:01:00Z", false)
+	insertCSMessage(t, store, "cs-terms-split", 2, "user",
+		"second mentions beta", "2026-05-01T10:02:00Z", false)
+
+	got, err := store.SearchContent(t.Context(), db.ContentSearchFilter{
+		Pattern: "alpha beta", Mode: "terms", Limit: 50, IncludeOneShot: true,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, got.Matches,
+		"terms in different exchanges of one session must not match")
+}
+
+func TestPGSearchContentTermsSnippetStaysBoundedForDistantTerms(t *testing.T) {
+	store := setupContentSearch(t)
+	insertCSSession(t, store, "cs-terms-long", "proj", "claude",
+		"2026-05-01T10:00:00Z", "2026-05-01T10:30:00Z")
+	insertCSMessage(t, store, "cs-terms-long", 0, "user",
+		"alpha "+strings.Repeat("filler ", 400), "2026-05-01T10:00:00Z", false)
+	insertCSMessage(t, store, "cs-terms-long", 1, "assistant",
+		strings.Repeat("padding ", 400)+"beta", "2026-05-01T10:01:00Z", false)
+
+	got, err := store.SearchContent(t.Context(), db.ContentSearchFilter{
+		Pattern: "alpha beta", Mode: "terms", Limit: 50, IncludeOneShot: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Matches, 1)
+	snippet := got.Matches[0].Snippet
+	assert.True(t, strings.HasPrefix(snippet, "alpha filler"), snippet)
+	assert.True(t, strings.HasSuffix(snippet, "padding beta"), snippet)
+	assert.Contains(t, snippet, " ... ")
+	// Two windows of at most 60 bytes of context per side, one separator.
+	assert.LessOrEqual(t, len(snippet), 260)
+}
+
 func TestPGSearchContentTermsScopeExactFiltersAndPaging(t *testing.T) {
 	store := setupContentSearch(t)
 	for _, session := range []struct {

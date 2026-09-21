@@ -1485,7 +1485,7 @@ func TestSearchContent_ScopeForwardedForScopedModes(t *testing.T) {
 			assert.Equal(t, mode, fake.lastReq.Mode)
 			assert.Equal(t, "subordinate", fake.lastReq.Scope,
 				"scope must reach the service untouched")
-			assert.Equal(t, "subordinate", out.AppliedFilters.Scope)
+			assert.Equal(t, "subordinate", out.EffectiveScope)
 		})
 	}
 
@@ -1495,14 +1495,15 @@ func TestSearchContent_ScopeForwardedForScopedModes(t *testing.T) {
 		Pattern: "retries", Mode: "terms", IncludeActive: true,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "all", out.AppliedFilters.Scope)
+	assert.Equal(t, "all", out.EffectiveScope)
 
 	_, out, err = ts.searchContent(t.Context(), nil, searchContentIn{
 		Pattern: "retries", IncludeActive: true,
 	})
 	require.NoError(t, err)
-	assert.Empty(t, out.RequestedMode)
 	assert.Equal(t, "substring", out.EffectiveMode)
+	assert.Empty(t, out.EffectiveScope,
+		"substring results are not conversation units, so no scope applies")
 }
 
 func TestSearchContent_RecallContractMapping(t *testing.T) {
@@ -1530,20 +1531,18 @@ func TestSearchContent_RecallContractMapping(t *testing.T) {
 	assert.Equal(t, "feature/memory", fake.lastReq.GitBranchExact)
 	assert.Equal(t, []string{"current"}, fake.lastReq.ExcludeSessionIDs)
 	assert.Equal(t, 50, fake.lastReq.Limit)
-	assert.Equal(t, "terms", out.RequestedMode)
 	assert.Equal(t, "terms", out.EffectiveMode)
-	assert.Equal(t, "older", out.AppliedFilters.SessionID)
-	assert.Equal(t, "feature/memory", out.AppliedFilters.GitBranch)
-	assert.Equal(t, "subordinate", out.AppliedFilters.Scope)
+	assert.Equal(t, "subordinate", out.EffectiveScope)
 	assert.Equal(t, "current", out.Exclusions.CurrentSessionID)
 	assert.False(t, out.Exclusions.RecentActive)
 	assert.True(t, out.Exclusions.OneShot)
 	assert.True(t, out.Exclusions.Automated)
-	assert.True(t, out.CandidateTruncated)
+	require.NotNil(t, out.NextCursor)
+	assert.Equal(t, 50, *out.NextCursor)
 	require.Len(t, out.Matches, 1)
 }
 
-func TestSearchContent_RejectsInvalidRecallLimits(t *testing.T) {
+func TestSearchContent_OutOfRangeLimitUsesDefault(t *testing.T) {
 	for _, limit := range []int{-1, 51} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
 			fake := &fakeContentSearchService{result: &service.ContentSearchResult{}}
@@ -1551,13 +1550,13 @@ func TestSearchContent_RejectsInvalidRecallLimits(t *testing.T) {
 			_, _, err := ts.searchContent(t.Context(), nil, searchContentIn{
 				Pattern: "needle", Limit: limit, IncludeActive: true,
 			})
-			require.EqualError(t, err, "limit must be between 1 and 50")
-			assert.Empty(t, fake.lastReq.Pattern)
+			require.NoError(t, err)
+			assert.Equal(t, 10, fake.lastReq.Limit)
 		})
 	}
 }
 
-func TestSearchContent_RejectsInvalidRecallDates(t *testing.T) {
+func TestSearchContent_RejectsInvalidDates(t *testing.T) {
 	for _, in := range []searchContentIn{
 		{Pattern: "needle", DateFrom: "09/01/2026"},
 		{Pattern: "needle", DateFrom: "2026-09-20", DateTo: "2026-09-01"},

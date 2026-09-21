@@ -531,7 +531,9 @@ type SessionFilter struct {
 	ExcludeProject string // exclude sessions with this project name
 	Machine        string
 	// GitBranch is a branchListSep-joined list of opaque (project, branch) tokens (EncodeBranchFilterToken).
-	GitBranch       string
+	GitBranch string
+	// GitBranchExact matches one raw branch name in any project. It is ANDed
+	// with GitBranch when both are set.
 	GitBranchExact  string
 	Agent           string
 	Date            string // date overlapped by session activity, YYYY-MM-DD

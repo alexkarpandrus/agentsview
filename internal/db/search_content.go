@@ -120,14 +120,13 @@ func searchInputErrorf(format string, a ...any) error {
 	return &SearchInputError{Msg: fmt.Sprintf(format, a...)}
 }
 
-// contentSessionFilter maps a ContentSearchFilter's session-scoping fields to
+// ContentSessionFilter maps a ContentSearchFilter's session-scoping fields to
 // a SessionFilter. Mirroring session list: one-shot and automated sessions
 // are excluded by default, and IncludeOneShot/IncludeAutomated opt them back
 // in. Comprehensive secret coverage comes from the secrets subsystem
-// (scanned over every session at sync), not from search defaults. Shared by
-// sessionScopeSubquery (substring/regex/fts) and the semantic-mode
-// allowed-session-id lookup so the mapping cannot drift between them.
-func contentSessionFilter(f ContentSearchFilter) SessionFilter {
+// (scanned over every session at sync), not from search defaults. Every
+// backend's content-search scope uses this one mapping so it cannot drift.
+func ContentSessionFilter(f ContentSearchFilter) SessionFilter {
 	return SessionFilter{
 		Project: f.Project, ExcludeProject: f.ExcludeProject,
 		Machine: f.Machine, GitBranch: f.GitBranch, Agent: f.Agent,
@@ -141,16 +140,30 @@ func contentSessionFilter(f ContentSearchFilter) SessionFilter {
 	}
 }
 
+// BuildContentScopeSQL returns the sessions-table WHERE clause that scopes a
+// substring/regex/fts content search, without the ExcludeSessionIDs
+// predicate (its bind syntax is backend-specific).
+//
+// Child sessions are hidden the same way the session list hides them, with
+// one exception: naming an exact SessionID asks for that session whatever its
+// relationship, so the child exclusion is dropped. Every other predicate
+// (one-shot, automated, project, dates) still applies to the named session.
+func BuildContentScopeSQL(
+	f ContentSearchFilter, dialect QueryDialect,
+) (string, []any) {
+	sf := ContentSessionFilter(f)
+	if f.SessionID != "" {
+		return BuildSessionBaseFilterSQL(sf, dialect)
+	}
+	return BuildSessionFilterSQL(sf, dialect)
+}
+
 // sessionScopeSubquery returns "session_id IN (SELECT id FROM sessions
-// WHERE <buildSessionFilter where>)" plus its args, reusing the session
+// WHERE <BuildContentScopeSQL where>)" plus its args, reusing the session
 // filter machinery. The Limit/Cursor on the inner filter are irrelevant
 // (no LIMIT in a SELECT id subquery), so they are left unset.
 func sessionScopeSubquery(f ContentSearchFilter) (string, []any) {
-	sessionFilter := contentSessionFilter(f)
-	where, args := buildSessionFilter(sessionFilter)
-	if f.SessionID != "" {
-		where, args = buildSessionBaseFilter(sessionFilter)
-	}
+	where, args := BuildContentScopeSQL(f, SQLiteQueryDialect())
 	where, args = AppendExcludeSessionIDs(where, args, "id", f.ExcludeSessionIDs)
 	return "session_id IN (SELECT id FROM sessions WHERE " + where + ")", args
 }
@@ -198,12 +211,12 @@ func AppendExcludeSessionIDs(
 }
 
 // semanticContentSessionFilter maps a ContentSearchFilter for the
-// semantic/hybrid session scope: the shared contentSessionFilter mapping
+// semantic/hybrid session scope: the shared ContentSessionFilter mapping
 // plus the child one-shot exemption (SessionFilter.ChildExemptOneShot) —
 // child sessions must not be dropped by the one-shot gate in these modes,
 // while top-level one-shots keep today's exclusion.
 func semanticContentSessionFilter(f ContentSearchFilter) SessionFilter {
-	sf := contentSessionFilter(f)
+	sf := ContentSessionFilter(f)
 	sf.ChildExemptOneShot = true
 	return sf
 }
@@ -423,43 +436,8 @@ func (db *DB) scanContentMatches(
 	return page, nil
 }
 
-// ParseContentSearchTerms returns de-duplicated whitespace-separated literal
-// terms while preserving first-seen spelling and order.
-func ParseContentSearchTerms(pattern string) []string {
-	fields := strings.Fields(pattern)
-	seen := make(map[string]struct{}, len(fields))
-	terms := make([]string, 0, len(fields))
-	for _, field := range fields {
-		key := strings.ToLower(field)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		terms = append(terms, field)
-	}
-	return terms
-}
-
-// ValidateTermsFilter validates the message-only, scope-aware terms mode.
-func ValidateTermsFilter(f ContentSearchFilter) error {
-	for _, source := range f.Sources {
-		if source != "messages" {
-			return searchInputErrorf(
-				"search: terms searches messages only (got source %q)", source)
-		}
-	}
-	switch f.Scope {
-	case "", "all", "top", "subordinate":
-		return nil
-	default:
-		return searchInputErrorf("search: invalid scope %q", f.Scope)
-	}
-}
-
-// searchContentTerms groups embeddable user/assistant rows into a transient
-// exchange: one user message and the following assistant run on the same
-// sidechain branch. Every whitespace-separated term must occur literally
-// somewhere in that exchange. Tool and system content never participates.
+// searchContentTerms runs the shared terms-mode query (BuildTermsSearchSQL)
+// against the SQLite archive.
 func (db *DB) searchContentTerms(
 	ctx context.Context, f ContentSearchFilter,
 ) (ContentSearchPage, error) {
@@ -470,122 +448,18 @@ func (db *DB) searchContentTerms(
 	if len(terms) == 0 {
 		return ContentSearchPage{}, nil
 	}
-
-	scope, scopeArgs := semanticSessionScopeSubquery(f)
-	subordinate := `(m.is_sidechain = 1
-		OR s.relationship_type IN ('subagent','fork')
-		OR (COALESCE(s.parent_session_id,'') <> ''
-			AND s.relationship_type <> 'continuation'))`
-	query := fmt.Sprintf(`
-		WITH eligible AS (
-			SELECT m.session_id, s.project, s.agent,
-				COALESCE(s.relationship_type,'') AS relationship_type,
-				COALESCE(s.parent_session_id,'') AS parent_session_id,
-				m.role, m.ordinal, COALESCE(m.timestamp,'') AS ts,
-				m.content, m.is_sidechain,
-				COALESCE(s.ended_at, s.started_at, s.created_at, '') AS sort_ts,
-				CASE WHEN %s THEN 1 ELSE 0 END AS subordinate,
-				CASE WHEN m.role = 'user' THEN 1 ELSE 0 END AS user_start
-			FROM messages m
-			JOIN sessions s ON s.id = m.session_id
-			WHERE m.role IN ('user','assistant')
-			  AND m.is_system = 0 AND %s AND m.%s
-		), tagged AS (
-			SELECT *, SUM(user_start) OVER (
-				PARTITION BY session_id, is_sidechain
-				ORDER BY ordinal ROWS UNBOUNDED PRECEDING
-			) AS exchange_no
-			FROM eligible
-		), exchanges AS (
-			SELECT session_id, project, agent, relationship_type,
-				parent_session_id, is_sidechain, subordinate, exchange_no,
-				MIN(ordinal) AS start_ordinal, MAX(ordinal) AS end_ordinal,
-				CASE WHEN exchange_no > 0 THEN 'user' ELSE 'assistant' END AS role,
-				MIN(ts) AS ts,
-				GROUP_CONCAT(content, char(10) ORDER BY ordinal) AS body,
-				MAX(sort_ts) AS sort_ts
-			FROM tagged
-			GROUP BY session_id, project, agent, relationship_type,
-				parent_session_id, is_sidechain, subordinate, exchange_no
-		)
-		SELECT session_id, project, agent, 'message', role, start_ordinal,
-			ts, body, end_ordinal, relationship_type, parent_session_id,
-			is_sidechain, subordinate
-		FROM exchanges`, subordinate, SystemPrefixSQL("m.content", "m.role"), scope)
-	args := append([]any{}, scopeArgs...)
-	var predicates []string
-	for _, term := range terms {
-		predicates = append(predicates, "body LIKE ? ESCAPE '\\'")
-		args = append(args, "%"+escapeLike(term)+"%")
+	query, args, err := BuildTermsSearchSQL(f, terms, SQLiteQueryDialect())
+	if err != nil {
+		return ContentSearchPage{}, err
 	}
-	if len(predicates) > 0 {
-		query += " WHERE " + strings.Join(predicates, " AND ")
-	}
-	switch f.Scope {
-	case "top":
-		query += " AND subordinate = 0"
-	case "subordinate":
-		query += " AND subordinate = 1"
-	}
-	query += ` ORDER BY subordinate ASC, julianday(sort_ts) DESC,
-		session_id ASC, start_ordinal ASC LIMIT ? OFFSET ?`
-	args = append(args, f.Limit+1, f.Cursor)
-	return db.scanTermsMatches(ctx, query, args, f, terms)
-}
-
-func (db *DB) scanTermsMatches(
-	ctx context.Context, query string, args []any,
-	f ContentSearchFilter, terms []string,
-) (ContentSearchPage, error) {
 	rows, err := db.getReader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return ContentSearchPage{}, fmt.Errorf("terms search: %w", err)
 	}
 	defer rows.Close()
-	matches := make([]ContentMatch, 0, f.Limit+1)
-	for rows.Next() {
-		var match ContentMatch
-		var body string
-		var endOrdinal int
-		if err := rows.Scan(
-			&match.SessionID, &match.Project, &match.Agent, &match.Location,
-			&match.Role, &match.Ordinal, &match.Timestamp, &body, &endOrdinal,
-			&match.Relationship, &match.ParentSessionID, &match.Sidechain,
-			&match.Subordinate,
-		); err != nil {
-			return ContentSearchPage{}, fmt.Errorf("scan terms match: %w", err)
-		}
-		match.OrdinalRange = [2]int{match.Ordinal, endOrdinal}
-		match.Snippet = f.TermsSnippet(body, terms)
-		matches = append(matches, match)
-	}
-	if err := rows.Err(); err != nil {
-		return ContentSearchPage{}, fmt.Errorf("iterate terms matches: %w", err)
-	}
-	page := ContentSearchPage{Matches: matches}
-	if len(matches) > f.Limit {
-		page.Matches = matches[:f.Limit]
-		page.NextCursor = f.Cursor + f.Limit
-	}
-	return page, nil
-}
-
-// TermsSnippet returns a redacted window covering the first occurrence of
-// every matched term in an exchange body.
-func (f ContentSearchFilter) TermsSnippet(body string, terms []string) string {
-	start, end := len(body), 0
-	for _, term := range terms {
-		termStart, termEnd, ok := CaseInsensitiveSpan(body, term)
-		if !ok {
-			continue
-		}
-		start = min(start, termStart)
-		end = max(end, termEnd)
-	}
-	if start == len(body) {
-		start = 0
-	}
-	return f.buildSnippet(body, start, end)
+	var timestamp string
+	return ScanTermsMatches(rows, f, terms, &timestamp,
+		func() string { return timestamp })
 }
 
 // searchContentRegex compiles the pattern, narrows candidate rows with a
@@ -644,11 +518,7 @@ func (db *DB) searchContentRegex(
 	if err := rows.Close(); err != nil {
 		return ContentSearchPage{}, fmt.Errorf("closing regex candidates: %w", err)
 	}
-	page := ContentSearchPage{Matches: out}
-	if len(out) > f.Limit {
-		page.Matches = out[:f.Limit]
-		page.NextCursor = f.Cursor + f.Limit
-	}
+	page := f.Page(out)
 	if err := db.deriveLexicalUnits(ctx, page.Matches); err != nil {
 		return ContentSearchPage{}, err
 	}
@@ -777,11 +647,43 @@ func snippetBounds(text string, start, end, radius int) (int, int) {
 // (which also catches secrets straddling the window edges).
 func (f ContentSearchFilter) buildSnippet(body string, start, end int) string {
 	lo, hi := snippetBounds(body, start, end, contentSnippetRadius)
+	return f.redactedWindow(body, lo, hi)
+}
+
+// redactedWindow returns body[lo:hi] with secrets masked unless the filter
+// opts into reveal.
+func (f ContentSearchFilter) redactedWindow(body string, lo, hi int) string {
 	if f.RevealSecrets {
 		return body[lo:hi]
 	}
 	return secrets.RedactWindow(body, lo, hi)
 }
+
+// Page trims matches fetched with a Limit+1 probe to one page and sets
+// NextCursor when the probe row shows more results exist.
+func (f ContentSearchFilter) Page(matches []ContentMatch) ContentSearchPage {
+	page := ContentSearchPage{Matches: matches}
+	if len(matches) > f.Limit {
+		page.Matches = matches[:f.Limit]
+		page.NextCursor = f.Cursor + f.Limit
+	}
+	return page
+}
+
+// ContentSearchModeSupportsScope reports whether Scope is meaningful for a
+// mode. Only the modes that return conversation units (terms, semantic,
+// hybrid) can separate top-level from subordinate results.
+func ContentSearchModeSupportsScope(mode string) bool {
+	switch mode {
+	case "terms", "semantic", "hybrid":
+		return true
+	}
+	return false
+}
+
+// ContentSearchScopeUnsupportedMsg is the transport-neutral message for a
+// Scope sent with a mode that ContentSearchModeSupportsScope rejects.
+const ContentSearchScopeUnsupportedMsg = "scope is only supported for semantic, hybrid, and terms search modes"
 
 // substringSnippet builds the snippet for a substring match: it locates the
 // case-insensitive pattern in body (the LIKE already matched, so it is present;
