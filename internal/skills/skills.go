@@ -18,7 +18,7 @@ import (
 	"text/template"
 )
 
-//go:embed templates/*.md.tmpl
+//go:embed templates/*.md.tmpl templates/LICENSE
 var templatesFS embed.FS
 
 // Harness identifies a skill discovery convention.
@@ -37,6 +37,10 @@ func AllHarnesses() []Harness {
 // skillName is the directory and frontmatter name for the only skill this
 // package currently renders.
 const skillName = "agentsview-finding-history"
+
+// licenseFileName is the MIT sidecar installed next to SKILL.md so the
+// model-facing skill and agent files do not carry the copyright text.
+const licenseFileName = "LICENSE"
 
 // claudeAgentDir is the Claude project agent directory, both as the prose
 // fragment in the delegation guard and as the base of the search agent's
@@ -233,14 +237,22 @@ func Render(h Harness, version string, remote Remote) (Rendered, error) {
 }
 
 // RenderPackage produces every artifact supported by h. Both harnesses get
-// the recall skill; Claude also gets the bounded search agent used by it.
+// the recall skill and its LICENSE sidecar; Claude also gets the bounded
+// search agent used by it.
 func RenderPackage(h Harness, version string, remote Remote) ([]Rendered, error) {
 	skill, err := Render(h, version, remote)
 	if err != nil {
 		return nil, err
 	}
 	skill.RelativePath = filepath.Join(skillsSubdir[h], skillName, "SKILL.md")
-	artifacts := []Rendered{skill}
+	license, err := renderLicense(
+		filepath.Join(skillsSubdir[h], skillName, licenseFileName),
+		version,
+	)
+	if err != nil {
+		return nil, err
+	}
+	artifacts := []Rendered{skill, license}
 
 	if h == HarnessClaude {
 		agent, err := renderTemplate(
@@ -291,6 +303,25 @@ func renderTemplate(
 	}, nil
 }
 
+// renderLicense wraps the static MIT sidecar with a generated-by header on
+// line one. Skill and agent files keep the header inside frontmatter so
+// harnesses still discover them; LICENSE is not parsed as frontmatter.
+func renderLicense(relativePath, version string) (Rendered, error) {
+	body, err := templatesFS.ReadFile("templates/" + licenseFileName)
+	if err != nil {
+		return Rendered{}, fmt.Errorf("skills: read %s: %w", licenseFileName, err)
+	}
+	hashed := string(body)
+	hash := bodyHash(hashed)
+	header := fmt.Sprintf(headerFormat, version, hash)
+	return Rendered{
+		Name:         licenseFileName,
+		RelativePath: relativePath,
+		Content:      header + "\n" + hashed,
+		Hash:         hash,
+	}, nil
+}
+
 // TargetDir returns the directory the skill installs into for a harness:
 // <base>/<claude-or-agents path>/agentsview-finding-history. base is the
 // home dir for user-level installs or the project root for --project.
@@ -317,14 +348,9 @@ func Classify(existing []byte, fresh Rendered) InstalledState {
 		return StateMissing
 	}
 
-	content := string(existing)
-	if !strings.HasPrefix(content, frontmatterFence) {
+	headerLine, hashedBody, ok := splitGeneratedBody(string(existing))
+	if !ok {
 		return StateForeign
-	}
-	headerLine, rest, hasRest := strings.Cut(
-		strings.TrimPrefix(content, frontmatterFence), "\n")
-	if !hasRest {
-		rest = ""
 	}
 
 	match := headerPattern.FindStringSubmatch(headerLine)
@@ -333,13 +359,37 @@ func Classify(existing []byte, fresh Rendered) InstalledState {
 	}
 	recordedHash := match[1]
 
-	if recordedHash != bodyHash(frontmatterFence+rest) {
+	if recordedHash != bodyHash(hashedBody) {
 		return StateModified
 	}
 	if recordedHash == fresh.Hash {
 		return StateCurrent
 	}
 	return StateStale
+}
+
+// splitGeneratedBody extracts the generated-by header line and the hashed
+// body from an installed file. Frontmatter files keep "---" as the first
+// line and put the header on line two; the hash covers the fence plus
+// everything after the header. Sidecar files such as LICENSE put the
+// header on line one and hash the remainder.
+func splitGeneratedBody(content string) (headerLine, hashedBody string, ok bool) {
+	if rest, hasFence := strings.CutPrefix(content, frontmatterFence); hasFence {
+		headerLine, rest, hasRest := strings.Cut(rest, "\n")
+		if !hasRest {
+			rest = ""
+		}
+		return headerLine, frontmatterFence + rest, true
+	}
+
+	headerLine, rest, hasRest := strings.Cut(content, "\n")
+	if !hasRest {
+		return "", "", false
+	}
+	if headerPattern.FindStringSubmatch(headerLine) == nil {
+		return "", "", false
+	}
+	return headerLine, rest, true
 }
 
 // bodyHash returns the sha256 hex digest of a rendered file's body, i.e.

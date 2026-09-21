@@ -17,11 +17,23 @@ func renderedPaths(pkg []Rendered) []string {
 	return paths
 }
 
+func artifactByBase(t *testing.T, pkg []Rendered, base string) Rendered {
+	t.Helper()
+	for _, artifact := range pkg {
+		if filepath.Base(artifact.RelativePath) == base {
+			return artifact
+		}
+	}
+	require.FailNow(t, "no artifact named "+base+" in "+strings.Join(renderedPaths(pkg), ", "))
+	return Rendered{}
+}
+
 func TestRenderPackage_HarnessArtifacts(t *testing.T) {
 	claude, err := RenderPackage(HarnessClaude, "dev", Remote{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		".claude/skills/agentsview-finding-history/SKILL.md",
+		".claude/skills/agentsview-finding-history/LICENSE",
 		".claude/agents/agentsview-search-conversations.md",
 	}, renderedPaths(claude))
 
@@ -29,14 +41,25 @@ func TestRenderPackage_HarnessArtifacts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		".agents/skills/agentsview-finding-history/SKILL.md",
+		".agents/skills/agentsview-finding-history/LICENSE",
 	}, renderedPaths(agents))
+}
+
+func TestRenderPackage_ProtectsLicenseEdits(t *testing.T) {
+	pkg, err := RenderPackage(HarnessAgents, "dev", Remote{})
+	require.NoError(t, err)
+	license := artifactByBase(t, pkg, licenseFileName)
+
+	assert.Equal(t, StateCurrent, Classify([]byte(license.Content), license))
+	assert.Equal(t, StateModified,
+		Classify([]byte(license.Content+"\nlocal edit\n"), license))
+	assert.Equal(t, StateForeign, Classify([]byte("MIT License\n"), license))
 }
 
 func TestRenderPackage_ProtectsSearchAgentEdits(t *testing.T) {
 	pkg, err := RenderPackage(HarnessClaude, "dev", Remote{})
 	require.NoError(t, err)
-	require.Len(t, pkg, 2)
-	agent := pkg[1]
+	agent := artifactByBase(t, pkg, "agentsview-search-conversations.md")
 
 	assert.Equal(t, StateCurrent, Classify([]byte(agent.Content), agent))
 	assert.Equal(t, StateModified,
@@ -65,9 +88,17 @@ func TestRenderRecallWorkflowContract(t *testing.T) {
 	assert.NotContains(t, skill, ".claude/agents")
 	assert.Contains(t, skill, "semantic search failed")
 	assert.Contains(t, skill, "Do not fall back on authentication or wrong-target errors")
-	assert.Contains(t, skill, "Copyright (c) 2025 Jesse Vincent")
+	assert.NotContains(t, skill, "Copyright (c) 2025 Jesse Vincent")
 	assert.NotContains(t, skill, "mcp__plugin_episodic-memory")
 	assert.NotContains(t, skill, "50-100x")
+
+	license := artifactByBase(t, rendered, licenseFileName).Content
+	assert.Contains(t, license, "Copyright (c) 2025 Jesse Vincent")
+	assert.Contains(t, license, "Permission is hereby granted")
+	assert.Contains(t, license, "7e06519357777badd7a115d2014a7ef845904310")
+	assert.False(t, strings.HasPrefix(license, "---\n"))
+	assert.Equal(t, StateCurrent,
+		Classify([]byte(license), artifactByBase(t, rendered, licenseFileName)))
 }
 
 // TestRenderClaudeSkillDelegationGuard pins the Claude-specific delegation
@@ -87,8 +118,7 @@ func TestRenderClaudeSkillDelegationGuard(t *testing.T) {
 func TestRenderClaudeSearchAgentContract(t *testing.T) {
 	rendered, err := RenderPackage(HarnessClaude, "dev", Remote{})
 	require.NoError(t, err)
-	require.Len(t, rendered, 2)
-	agent := rendered[1].Content
+	agent := artifactByBase(t, rendered, "agentsview-search-conversations.md").Content
 
 	assert.Contains(t, agent, "name: agentsview-search-conversations")
 	assert.Contains(t, agent, "model: haiku")
@@ -116,6 +146,7 @@ func TestRenderClaudeSearchAgentContract(t *testing.T) {
 	assert.Contains(t, agent, "Skimmed")
 	assert.Contains(t, agent, "ordinal range")
 	assert.NotContains(t, agent, "% match")
+	assert.NotContains(t, agent, "Copyright (c) 2025 Jesse Vincent")
 }
 
 func TestRemoteArgs(t *testing.T) {

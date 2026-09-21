@@ -40,6 +40,14 @@ func claudeSearchAgentPath(home string) string {
 	return filepath.Join(home, ".claude", "agents", "agentsview-search-conversations.md")
 }
 
+func claudeLicensePath(home string) string {
+	return filepath.Join(skills.TargetDir(skills.HarnessClaude, home), "LICENSE")
+}
+
+func agentsLicensePath(home string) string {
+	return filepath.Join(skills.TargetDir(skills.HarnessAgents, home), "LICENSE")
+}
+
 // agentsSkillPath returns the SKILL.md path the CLI installs for the Agents
 // harness under home.
 func agentsSkillPath(home string) string {
@@ -199,6 +207,8 @@ func TestSkillsInstall_DefaultHarnessesInstallBoth(t *testing.T) {
 	assert.Contains(t, out, agentsSkillPath(home))
 	assert.FileExists(t, claudeSkillPath(home))
 	assert.FileExists(t, agentsSkillPath(home))
+	assert.FileExists(t, claudeLicensePath(home))
+	assert.FileExists(t, agentsLicensePath(home))
 }
 
 func TestSkillsInstall_ClaudeInstallsRecallPackage(t *testing.T) {
@@ -209,8 +219,16 @@ func TestSkillsInstall_ClaudeInstallsRecallPackage(t *testing.T) {
 		"skills", "install", "--harness", "claude")
 	require.NoError(t, err, "output: %s", out)
 	assert.FileExists(t, claudeSkillPath(home))
+	assert.FileExists(t, claudeLicensePath(home))
 	assert.FileExists(t, claudeSearchAgentPath(home))
+	assert.Contains(t, out, claudeLicensePath(home))
 	assert.Contains(t, out, claudeSearchAgentPath(home))
+	assert.Contains(t, readFileString(t, claudeLicensePath(home)),
+		"Copyright (c) 2025 Jesse Vincent")
+	assert.NotContains(t, readFileString(t, claudeSkillPath(home)),
+		"Copyright (c) 2025 Jesse Vincent")
+	assert.NotContains(t, readFileString(t, claudeSearchAgentPath(home)),
+		"Copyright (c) 2025 Jesse Vincent")
 }
 
 func TestSkillsInstall_RefusedAgentStillInstallsSkill(t *testing.T) {
@@ -369,8 +387,10 @@ func TestSkillsList_HumanTableHasHeaderAndColumns(t *testing.T) {
 	assert.Contains(t, out, "PATH")
 	assert.Contains(t, out, "claude")
 	assert.Contains(t, out, "agents")
+	assert.Contains(t, out, "license")
 	assert.Contains(t, out, "missing")
 	assert.Contains(t, out, claudeSkillPath(home))
+	assert.Contains(t, out, claudeLicensePath(home))
 	assert.Contains(t, out, claudeSearchAgentPath(home))
 }
 
@@ -399,9 +419,11 @@ func TestSkillsList_ReportsPackageArtifacts(t *testing.T) {
 	}
 	assert.Equal(t, map[string]string{
 		"skill":        "current",
+		"license":      "current",
 		"search-agent": "modified",
 	}, states)
 	assert.Equal(t, claudeSkillPath(home), paths["skill"])
+	assert.Equal(t, claudeLicensePath(home), paths["license"])
 	assert.Equal(t, claudeSearchAgentPath(home), paths["search-agent"])
 }
 

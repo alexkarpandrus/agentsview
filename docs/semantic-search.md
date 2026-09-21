@@ -889,11 +889,11 @@ differ between the backends.
 
 ## Skills for coding agents
 
-`agentsview skills install` writes a proactive conversation-recall skill.
-Agents consult history when prior decisions, rationale, solutions, pitfalls,
-or project context may help, when stuck, and before guessing about something
-learned previously. The skill starts with the registered `search_content` MCP
-tool, reads the top sources with `get_messages`, follows continuation, and
+`agentsview skills install` writes a proactive conversation-recall skill. Agents
+consult history when prior decisions, rationale, solutions, pitfalls, or project
+context may help, when stuck, and before guessing about something learned
+previously. The skill starts with the registered `search_content` MCP tool,
+reads the top sources with `get_messages`, follows continuation, and
 distinguishes snippets and summaries from messages read in detail. The runtime
 supplies the client-specific MCP tool prefix.
 
@@ -902,11 +902,10 @@ the bounded search and returns Summary / Sources / For Follow-Up. Its
 frontmatter denies built-in shell, file, network, dispatch, and MCP-discovery
 tools, and it fails closed when tool discovery is deferred. Tools from other
 registered MCP servers remain inherited from the session; the agent is
-instructed to use only the AgentsView tools. Codex and
-other `.agents/skills` readers run the same MCP workflow directly when they do
-not have a permitted search agent. The generated skill retains CLI examples as
-a secondary fallback and preserves baked remote-server targeting across
-reinstalls.
+instructed to use only the AgentsView tools. Codex and other `.agents/skills`
+readers run the same MCP workflow directly when they do not have a permitted
+search agent. The generated skill retains CLI examples as a secondary fallback
+and preserves baked remote-server targeting across reinstalls.
 
 ```bash
 agentsview skills install                    # both harnesses, user level
@@ -919,21 +918,23 @@ agentsview skills list                       # show install state per artifact
 | `--harness` | Artifact     | Target                                                                                                                     |
 | ----------- | ------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | `claude`    | skill        | `~/.claude/skills/agentsview-finding-history/SKILL.md`                                                                     |
+| `claude`    | license      | `~/.claude/skills/agentsview-finding-history/LICENSE`                                                                      |
 | `claude`    | search-agent | `~/.claude/agents/agentsview-search-conversations.md`                                                                      |
 | `agents`    | skill        | `$HOME/.agents/skills/agentsview-finding-history/SKILL.md` — the open convention Codex reads (per Codex's own skills docs) |
+| `agents`    | license      | `$HOME/.agents/skills/agentsview-finding-history/LICENSE`                                                                  |
 
 `--project` swaps the base from the home directory to the current git root (or
 the working directory itself outside a repo), writing to `.claude/skills/...`
 and `.agents/skills/...` instead.
 
-Every rendered artifact carries a `generated-by` header with a content hash,
-written as a YAML comment just inside the frontmatter fence so the file still
-starts with `---` and harnesses keep discovering it. `install` classifies and
-protects each file independently: one refused local edit does not block safe
-package files from installing. Pass `--force` to overwrite modified or foreign
-files. Re-run `agentsview skills install` after upgrading `agentsview`; the
-content hash, rather than the displayed version, decides whether each artifact
-is current.
+Every rendered artifact carries a `generated-by` header with a content hash.
+Skill and agent files put that comment just inside the frontmatter fence so the
+file still starts with `---` and harnesses keep discovering it. The MIT sidecar
+puts the same header on line one. `install` classifies and protects each file
+independently: one refused local edit does not block safe package files from
+installing. Pass `--force` to overwrite modified or foreign files. Re-run
+`agentsview skills install` after upgrading `agentsview`; the content hash,
+rather than the displayed version, decides whether each artifact is current.
 
 `agentsview skills list [--project] [--format json]` reports each artifact's
 harness, kind, path, and install state — `missing`, `current`, `stale`

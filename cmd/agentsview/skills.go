@@ -243,10 +243,14 @@ func printSkillListHuman(w io.Writer, rows []skillListRow) error {
 }
 
 func skillArtifactName(rendered skills.Rendered) string {
-	if filepath.Base(rendered.RelativePath) == skillFileName {
+	switch filepath.Base(rendered.RelativePath) {
+	case skillFileName:
 		return "skill"
+	case "LICENSE":
+		return "license"
+	default:
+		return "search-agent"
 	}
-	return "search-agent"
 }
 
 func skillStateString(s skills.InstalledState) string {

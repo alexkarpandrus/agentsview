@@ -664,25 +664,28 @@ in the [user-facing error taxonomy](/docs/semantic-search/#error-taxonomy).
 `internal/skills` renders a harness-specific artifact package (see
 [Skills for coding agents](/docs/semantic-search/#skills-for-coding-agents))
 from embedded templates via `go:embed`. Both harnesses receive
-`agentsview-finding-history`; Claude also receives the
-`agentsview-search-conversations` agent. The generic Agents/Codex package stays
-skill-only and follows the same MCP workflow directly when no permitted search
-agent exists.
+`agentsview-finding-history` plus a `LICENSE` sidecar; Claude also receives the
+`agentsview-search-conversations` agent. The generic Agents/Codex package still
+ships the skill and LICENSE and follows the same MCP workflow directly when no
+permitted search agent exists.
 
-`RenderPackage` assigns every artifact an install-relative path and feeds both
-templates through the same generated-header and content-hash renderer. The
-skill receives the harness-specific delegation phrase and optional `--server` /
-`--server-token-file` suffixes. Its `# install-remote:` JSON comment records
-remote intent so `skills list` and a flagless reinstall classify the package
-against the same target. The search agent is endpoint-neutral and calls the
-registered `search_content` and `get_messages` tool names.
+`RenderPackage` assigns every artifact an install-relative path. Skill and agent
+templates go through the frontmatter generated-header renderer. The MIT sidecar
+is a static file whose generated-by header sits on line one. The copyright
+notice lives in that sidecar. The skill receives the harness-specific delegation
+phrase and optional `--server` / `--server-token-file` suffixes. Its
+`# install-remote:` JSON comment records remote intent so `skills list` and a
+flagless reinstall classify the package against the same target. The search
+agent is endpoint-neutral and calls the registered `search_content` and
+`get_messages` tool names.
 
 Classification remains hash-authoritative and per file. `Classify` compares an
 artifact's recorded hash against its body to detect modification and against a
-fresh render to detect staleness. Install therefore refuses a modified agent
-without preventing a safe skill update, and list emits one row per artifact.
-The CLI version in the header remains informational because development builds
-all report `"dev"`.
+fresh render to detect staleness. Frontmatter files hash the fence plus the body
+after the header; sidecars hash everything after line one. Install therefore
+refuses a modified agent without preventing a safe skill or license update, and
+list emits one row per artifact. The CLI version in the header remains
+informational because development builds all report `"dev"`.
 
 The templates adapt the pinned Episodic Memory skill, agent, and prompt under
 MIT; the
