@@ -113,6 +113,7 @@ func TestRenderClaudeSkillDelegationGuard(t *testing.T) {
 	assert.Contains(t, skill, "the project's")
 	assert.Contains(t, skill, ".claude/agents/` directory")
 	assert.Contains(t, skill, "without that header")
+	assert.Contains(t, skill, "registered as `agentsview`")
 }
 
 func TestRenderClaudeSearchAgentContract(t *testing.T) {
@@ -122,20 +123,17 @@ func TestRenderClaudeSearchAgentContract(t *testing.T) {
 
 	assert.Contains(t, agent, "name: agentsview-search-conversations")
 	assert.Contains(t, agent, "model: haiku")
-	// The subagent reads untrusted archived transcripts, so its frontmatter
-	// denies every capability-bearing Claude Code built-in tool (shell, file
-	// mutation, network, local reads, subagent dispatch, slash commands, and
-	// skills) plus the plan-mode housekeeping built-ins. MCPSearch is denied
-	// too so deferred MCP tool discovery fails closed instead of exposing
-	// other servers' tools. A `tools:` allowlist cannot name the dynamically
-	// prefixed AgentsView MCP tools, so a deny list is the only mechanism
-	// that keeps those tools callable.
+	// The subagent reads untrusted archived transcripts. Claude Code treats
+	// `tools` as the complete set, and an allowlist cannot wildcard the MCP
+	// server segment, so the agent names the documented `agentsview` server
+	// and only its read-only search and message tools. A deny list would
+	// leave every other registered MCP server callable.
 	assert.Contains(t, agent,
-		"disallowedTools: Bash, Edit, Write, NotebookEdit, Read, Grep, Glob, "+
-			"WebFetch, WebSearch, Task, Agent, SlashCommand, Skill, TodoWrite, "+
-			"BashOutput, KillShell, AskUserQuestion, ExitPlanMode, EnterPlanMode, "+
-			"MCPSearch")
-	assert.Contains(t, agent, "Use only the AgentsView MCP tools")
+		"tools: mcp__agentsview__search_content, mcp__agentsview__get_messages")
+	assert.NotContains(t, agent, "disallowedTools:")
+	assert.NotContains(t, agent, "Ignore tools from every other")
+	assert.Contains(t, agent, "`mcp__agentsview__search_content`")
+	assert.Contains(t, agent, "`mcp__agentsview__get_messages`")
 	assert.Contains(t, agent, "incomplete evidence")
 	assert.Contains(t, agent, "### Summary")
 	assert.Contains(t, agent, "### Sources")

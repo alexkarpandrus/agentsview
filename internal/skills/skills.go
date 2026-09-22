@@ -51,7 +51,8 @@ const claudeAgentDir = ".claude/agents"
 // {{.Delegate}} in the template: whether the harness can dispatch a search
 // subagent or must run the bounded probes itself.
 var delegatePhrases = map[Harness]string{
-	HarnessClaude: "Use the `agentsview-search-conversations` agent when this harness exposes it; " +
+	HarnessClaude: "Use the `agentsview-search-conversations` agent when this harness exposes it " +
+		"and the AgentsView MCP server is registered as `agentsview`; " +
 		"otherwise follow these steps directly",
 	HarnessAgents: "Delegate to a permitted search agent if this harness provides one; " +
 		"otherwise follow these steps directly",

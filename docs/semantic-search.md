@@ -898,14 +898,17 @@ distinguishes snippets and summaries from messages read in detail. The runtime
 supplies the client-specific MCP tool prefix.
 
 Claude Code also receives an `agentsview-search-conversations` agent that runs
-the bounded search and returns Summary / Sources / For Follow-Up. Its
-frontmatter denies built-in shell, file, network, dispatch, and MCP-discovery
-tools, and it fails closed when tool discovery is deferred. Tools from other
-registered MCP servers remain inherited from the session; the agent is
-instructed to use only the AgentsView tools. Codex and other `.agents/skills`
-readers run the same MCP workflow directly when they do not have a permitted
-search agent. The generated skill retains CLI examples as a secondary fallback
-and preserves baked remote-server targeting across reinstalls.
+the bounded search and returns Summary / Sources / For Follow-Up. Its `tools`
+frontmatter allowlists only `mcp__agentsview__search_content` and
+`mcp__agentsview__get_messages`. Claude Code treats that list as the agent's
+complete tool set, so built-in tools and tools from every other MCP server are
+unavailable. Register the AgentsView server as `agentsview`, the name in the
+[MCP quick start](/docs/mcp/#quick-start). A server registered under another
+name does not match the allowlist, the agent does not start, and the skill runs
+the same MCP workflow directly. Codex and other `.agents/skills` readers run
+that workflow directly when they do not have a permitted search agent. The
+generated skill retains CLI examples as a secondary fallback and preserves baked
+remote-server targeting across reinstalls.
 
 ```bash
 agentsview skills install                    # both harnesses, user level

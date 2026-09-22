@@ -1667,7 +1667,9 @@ agentsview skills list [--project] [--format json]
 under `~/.claude/skills/agentsview-finding-history/` and/or
 `~/.agents/skills/agentsview-finding-history/`, with `SKILL.md` and a `LICENSE`
 sidecar in each directory. Claude's search agent lands at
-`~/.claude/agents/agentsview-search-conversations.md`. `--project` uses the
+`~/.claude/agents/agentsview-search-conversations.md`. That agent allowlists
+only `mcp__agentsview__search_content` and `mcp__agentsview__get_messages`, so
+the Claude MCP server entry must be named `agentsview`. `--project` uses the
 equivalent paths at the current git root. Each artifact has its own generated
 hash: install updates safe generated files, refuses hand-edited or foreign files
 unless `--force` is passed, continues processing the other artifacts, and exits

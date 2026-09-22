@@ -676,8 +676,10 @@ notice lives in that sidecar. The skill receives the harness-specific delegation
 phrase and optional `--server` / `--server-token-file` suffixes. Its
 `# install-remote:` JSON comment records remote intent so `skills list` and a
 flagless reinstall classify the package against the same target. The search
-agent is endpoint-neutral and calls the registered `search_content` and
-`get_messages` tool names.
+agent is endpoint-neutral. Its `tools` frontmatter allowlists
+`mcp__agentsview__search_content` and `mcp__agentsview__get_messages`, so Claude
+Code does not grant built-in tools or tools from any other MCP server. The
+server entry must be named `agentsview`.
 
 Classification remains hash-authoritative and per file. `Classify` compares an
 artifact's recorded hash against its body to detect modification and against a
