@@ -4,9 +4,12 @@ package main
 
 import (
 	"encoding/json/v2"
+	"errors"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -180,11 +183,28 @@ func (w *startupStateWriter) write() {
 		w.warn(err)
 		return
 	}
-	if err := os.Rename(tmp, w.path); err != nil {
+	if err := replaceStartupStateFile(tmp, w.path); err != nil {
 		w.warn(err)
 		return
 	}
 	w.lastWrite = w.now()
+}
+
+// replaceStartupStateFile renames tmp over path. Windows refuses to replace a
+// file that another process has open, and `serve status` and archive-write
+// waiters read this file while the daemon rewrites it. A dropped write can
+// leave a waiter without the progress that extends its deadline, so retry
+// briefly while the reader's handle closes.
+func replaceStartupStateFile(tmp, path string) error {
+	err := os.Rename(tmp, path)
+	for delay := time.Millisecond; err != nil && delay <= 16*time.Millisecond; delay *= 2 {
+		if runtime.GOOS != "windows" || !errors.Is(err, fs.ErrPermission) {
+			return err
+		}
+		time.Sleep(delay)
+		err = os.Rename(tmp, path)
+	}
+	return err
 }
 
 func (w *startupStateWriter) warn(err error) {
@@ -248,7 +268,7 @@ func publishStartupStateFallback(
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
-	if err := os.Rename(tmp, startupStatePath(dataDir)); err != nil {
+	if err := replaceStartupStateFile(tmp, startupStatePath(dataDir)); err != nil {
 		_ = os.Remove(tmp)
 	}
 }
