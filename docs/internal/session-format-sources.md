@@ -3444,6 +3444,9 @@ schemas keep their existing ordering behavior.
   The bundled storage document defines `JUNIE_HOME`; `SessionStore` bytecode
   defines `sessions/index.jsonl`, `sessions/<sessionId>/events.jsonl`, and the
   timestamp append. Producer serializers generated representative records for
+  `SessionStore` atomically replaces the complete index rather than appending
+  changed rows, so watcher ingestion compares complete normalized snapshots;
+  the filesystem event does not identify which summary row changed.
   `UserPromptEvent`, `UserResponseEvent`, `UserAsyncResponseEvent`,
   `SessionTitleSetEvent`, and nested `SessionA2uxEvent` values.
 

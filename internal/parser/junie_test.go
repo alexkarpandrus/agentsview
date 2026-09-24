@@ -201,7 +201,8 @@ func TestJunieSourceSetDiscoversOnlyEventStreams(t *testing.T) {
 		WatchRoot: root,
 	})
 	require.NoError(t, err)
-	require.Len(t, changed, 2)
+	require.Len(t, changed, 1, "a missing index must not create destructive removal work")
+	assert.Equal(t, "session-one", changed[0].ProjectHint)
 }
 
 func TestJunieSourceSetReusesIndexSnapshotWhileParsing(t *testing.T) {
@@ -563,11 +564,15 @@ func TestJunieIncompleteIndexDoesNotReplaceCachedSnapshot(t *testing.T) {
 	), 0o600))
 	_, err = provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
 	require.ErrorContains(t, err, "invalid JSON")
+	require.NoError(t, os.Remove(indexPath))
+	changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+	require.NoError(t, err)
+	assert.Empty(t, changed, "a missing shared index must not erase the last complete snapshot")
 
 	after := `{"sessionId":"session-a","taskName":"After"}` + "\n" +
 		`{"sessionId":"session-b","taskName":"Stable"}` + "\n"
 	require.NoError(t, os.WriteFile(indexPath, []byte(after), 0o600))
-	changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+	changed, err = provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
 	require.NoError(t, err)
 	require.Len(t, changed, 1)
 	assert.Equal(t, "session-a", changed[0].ProjectHint)

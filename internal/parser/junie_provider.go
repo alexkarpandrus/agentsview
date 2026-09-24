@@ -165,7 +165,7 @@ func (s junieSourceSet) FindSource(
 		return SourceRef{}, false, err
 	}
 	if !present {
-		snapshot = map[string]string{}
+		return source, true, nil
 	}
 	s.indexCache.setActiveSnapshot(indexPath, snapshot)
 	return source, true, nil
@@ -249,12 +249,14 @@ func (c *junieIndexCache) classifyIndexChange(
 	if err != nil {
 		return nil, err
 	}
-	if !present {
-		current = map[string]string{}
-	}
 	previous, known := c.watchSummaries[indexPath]
 	if !known {
 		previous = map[string]string{}
+	}
+	if !present {
+		// The producer atomically replaces the complete index. A missing file is
+		// not a valid replacement snapshot, so retain the last complete view.
+		current = previous
 	}
 	changedIDs := changedJunieSummaryIDs(previous, current)
 	c.watchSummaries[indexPath] = current
@@ -370,10 +372,14 @@ func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !present {
-			snapshot = map[string]string{}
-		}
 		s.indexCache.mu.Lock()
+		if !present {
+			if previous, loaded := s.indexCache.watchSummaries[indexPath]; loaded {
+				snapshot = previous
+			} else {
+				snapshot = map[string]string{}
+			}
+		}
 		s.indexCache.watchSummaries[indexPath] = snapshot
 		s.indexCache.activeSummaries[indexPath] = snapshot
 		s.indexCache.mu.Unlock()
