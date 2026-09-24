@@ -32,6 +32,7 @@ const (
 	AgentCursor         AgentType = "cursor"
 	AgentCursorIDE      AgentType = "cursor-ide"
 	AgentIflow          AgentType = "iflow"
+	AgentJunie          AgentType = "junie"
 	AgentAmp            AgentType = "amp"
 	AgentZencoder       AgentType = "zencoder"
 	AgentVSCodeCopilot  AgentType = "vscode-copilot"
@@ -394,6 +395,18 @@ var Registry = []AgentDef{
 		DefaultDirs: []string{".local/share/amp/threads"},
 		IDPrefix:    "amp:",
 		FileBased:   true,
+	},
+	{
+		Type:              AgentJunie,
+		DisplayName:       "Junie",
+		EnvVar:            "JUNIE_DIR",
+		DefaultRootEnvVar: "JUNIE_HOME",
+		DefaultRootDir:    ".junie",
+		ConfigKey:         "junie_dirs",
+		HomesSupported:    true,
+		DefaultDirs:       []string{".junie/sessions"},
+		IDPrefix:          "junie:",
+		FileBased:         true,
 	},
 	{
 		Type:        AgentZencoder,
