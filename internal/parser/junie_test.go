@@ -30,6 +30,8 @@ func TestParseJunieSession(t *testing.T) {
 			`{"kind":"SessionA2uxEvent","event":{"state":"IN_PROGRESS","agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"step-1","text":"thinking aloud"}},"timestampMs":1704067203000}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"IN_PROGRESS","agentEvent":{"kind":"ResultBlockUpdatedEvent","stepId":"step-1","cancelled":false,"result":"draft","changes":[]}},"timestampMs":1704067204000}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"COMPLETED","agentEvent":{"kind":"ResultBlockUpdatedEvent","stepId":"step-1","cancelled":false,"result":"<!-- ANSWER -->Done","changes":[]}},"timestampMs":1704067205000}` + "\n" +
+			// Summarization cost snapshots can occur during compaction; they must not terminate the message stream.
+			`{"kind":"SessionCostTrajectorySnapshotEvent","snapshot":{"attributedGroups":[{"costPurpose":"SUMMARIZATION","callPurpose":"SUMMARIZATION"}]},"timestampMs":1704067205200}` + "\n" +
 			`{"kind":"SystemMessageEvent","text":"Notice","details":"Details","level":"ERROR","symbol":"!","timestampMs":1704067205500}` + "\n" +
 			`{"kind":"AgentTaskFailedEvent","timestampMs":1704067205600}` + "\n" +
 			`{"kind":"UserAsyncResponseEvent","entries":[{"question":"Continue?","answer":"Yes"}],"timestampMs":1704067206000}` + "\n" +
