@@ -71,22 +71,6 @@ func (s junieSourceSet) DiscoverEach(
 	return s.JSONLSourceSet.DiscoverEach(ctx, yield)
 }
 
-func (s junieSourceSet) WatchPlan(ctx context.Context) (WatchPlan, error) {
-	plan, err := s.JSONLSourceSet.WatchPlan(ctx)
-	if err != nil {
-		return WatchPlan{}, err
-	}
-	for i := range plan.Roots {
-		plan.Roots[i].IncludeGlobs = append(plan.Roots[i].IncludeGlobs, "index.jsonl")
-	}
-	return plan, nil
-}
-
-func (s junieSourceSet) WatchRoots(ctx context.Context) ([]WatchRoot, error) {
-	plan, err := s.WatchPlan(ctx)
-	return plan.Roots, err
-}
-
 func (s junieSourceSet) SourcesForChangedPath(
 	ctx context.Context, req ChangedPathRequest,
 ) ([]SourceRef, error) {
@@ -126,6 +110,13 @@ func (s junieSourceSet) SourcesForChangedPath(
 	sources := make([]SourceRef, 0, len(changedIDs))
 	for _, sessionID := range changedIDs {
 		path := filepath.Join(root, sessionID, "events.jsonl")
+		if !IsDirectoryJSONLPath(root, path) {
+			continue
+		}
+		dirInfo, err := os.Lstat(filepath.Dir(path))
+		if err != nil || !dirInfo.IsDir() {
+			continue
+		}
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() {
 			continue

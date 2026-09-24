@@ -28,6 +28,11 @@ func TestParseJunieSession(t *testing.T) {
 		`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"hidden context","presentablePrompt":"Implement it","askMode":false,"thinkMore":false,"timestampMs":1704067201000}` + "\n" +
 			`{"kind":"UserPromptEvent","requestId":"req-dropped","prompt":"Drop me","askMode":false,"thinkMore":false,"timestampMs":1704067202000}` + "\n" +
 			`{"kind":"UserMessagesDroppedFromHistory","userMessageIds":["req-dropped"],"timestampMs":1704067202500}` + "\n" +
+			`{"kind":"UserPromptEvent","requestId":"req-restored","prompt":"Restore me","timestampMs":1704067202600}` + "\n" +
+			`{"kind":"UserMessagesDroppedFromHistory","userMessageIds":["req-restored"],"timestampMs":1704067202700}` + "\n" +
+			`{"kind":"UserMessagesCommittedToHistory","userMessageIds":["req-restored"],"timestampMs":1704067202800}` + "\n" +
+			`{"kind":"UserPromptEvent","requestId":"req-failed","prompt":"Fail me","timestampMs":1704067202850}` + "\n" +
+			`{"kind":"UserMessagesFailedInHistory","userMessageIds":["req-failed"],"timestampMs":1704067202900}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"IN_PROGRESS","agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"step-1","text":"thinking aloud"}},"timestampMs":1704067203000}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"IN_PROGRESS","agentEvent":{"kind":"ResultBlockUpdatedEvent","stepId":"step-1","cancelled":false,"result":"draft","changes":[]}},"timestampMs":1704067204000}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"COMPLETED","agentEvent":{"kind":"ResultBlockUpdatedEvent","stepId":"step-1","cancelled":false,"result":"<!-- ANSWER -->Done","changes":[]}},"timestampMs":1704067205000}` + "\n" +
@@ -58,8 +63,8 @@ func TestParseJunieSession(t *testing.T) {
 	assert.True(t, sess.SessionNamePresent)
 	assert.Equal(t, time.UnixMilli(1704067200000), sess.StartedAt)
 	assert.Equal(t, time.UnixMilli(1704067207000), sess.EndedAt)
-	assert.Equal(t, 6, sess.MessageCount)
-	assert.Equal(t, 2, sess.UserMessageCount)
+	assert.Equal(t, 7, sess.MessageCount)
+	assert.Equal(t, 3, sess.UserMessageCount)
 	assert.Equal(t, 1, sess.MalformedLines)
 	assert.True(t, sess.HasTotalOutputTokens)
 	assert.Equal(t, 40, sess.TotalOutputTokens)
@@ -79,21 +84,22 @@ func TestParseJunieSession(t *testing.T) {
 	assert.Equal(t, "exact", usage.CostStatus)
 	assert.Equal(t, "junie-model-usage", usage.CostSource)
 	assert.Equal(t, "2024-01-01T00:00:05.1Z", usage.OccurredAt)
-	assert.Equal(t, "junie:"+sessionID+":llm-response:7:0", usage.DedupKey)
+	assert.Equal(t, "junie:"+sessionID+":llm-response:12:0", usage.DedupKey)
 
-	require.Len(t, messages, 6)
+	require.Len(t, messages, 7)
 	assertMessage(t, messages[0], RoleUser, "Implement it")
-	assertMessage(t, messages[1], RoleAssistant, "Done")
-	assertMessage(t, messages[2], RoleSystem, "Notice\n\nDetails")
-	assertMessage(t, messages[3], RoleSystem, "Agent task failed")
-	assert.True(t, messages[2].IsSystem)
+	assertMessage(t, messages[1], RoleUser, "Restore me")
+	assertMessage(t, messages[2], RoleAssistant, "Done")
+	assertMessage(t, messages[3], RoleSystem, "Notice\n\nDetails")
+	assertMessage(t, messages[4], RoleSystem, "Agent task failed")
 	assert.True(t, messages[3].IsSystem)
-	assertMessage(t, messages[4], RoleUser, "Continue?\nYes")
-	assertMessage(t, messages[5], RoleAssistant, "Finished")
+	assert.True(t, messages[4].IsSystem)
+	assertMessage(t, messages[5], RoleUser, "Continue?\nYes")
+	assertMessage(t, messages[6], RoleAssistant, "Finished")
 	for i, message := range messages {
 		assert.Equal(t, i, message.Ordinal)
 	}
-	assert.Equal(t, time.UnixMilli(1704067205000), messages[1].Timestamp)
+	assert.Equal(t, time.UnixMilli(1704067205000), messages[2].Timestamp)
 }
 
 func TestParseJunieSessionRejectsInvalidReportedCost(t *testing.T) {
@@ -141,16 +147,6 @@ func TestJunieSourceSetDiscoversOnlyEventStreams(t *testing.T) {
 	assert.Equal(t, "session-one", sources[0].ProjectHint)
 	assert.Equal(t, filepath.Join(root, "session-one", "events.jsonl"), sources[0].DisplayPath)
 	assert.Equal(t, "session-two", sources[1].ProjectHint)
-	plan, err := provider.WatchPlan(t.Context())
-	require.NoError(t, err)
-	require.Len(t, plan.Roots, 1)
-	assert.Contains(t, plan.Roots[0].IncludeGlobs, "index.jsonl")
-	planner, ok := provider.(WatchRootPlanner)
-	require.True(t, ok)
-	watchRoots, err := planner.WatchRoots(t.Context())
-	require.NoError(t, err)
-	require.Len(t, watchRoots, 1)
-	assert.Contains(t, watchRoots[0].IncludeGlobs, "index.jsonl")
 
 	fingerprint, err := provider.Fingerprint(t.Context(), sources[0])
 	require.NoError(t, err)
@@ -319,4 +315,32 @@ func TestParseJunieSessionIgnoresSymlinkedIndex(t *testing.T) {
 	assert.Equal(t, "junie", sess.Project)
 	assert.Empty(t, sess.Cwd)
 	assert.Empty(t, sess.SessionName)
+}
+
+func TestJunieIndexChangeIgnoresSymlinkedSessionDirectory(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "events.jsonl"), []byte(
+		`{"kind":"UserPromptEvent","requestId":"outside","prompt":"Outside"}`+"\n",
+	), 0o600))
+	if err := os.Symlink(outside, filepath.Join(root, "session-outside")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	indexPath := filepath.Join(root, "index.jsonl")
+	require.NoError(t, os.WriteFile(indexPath, nil, 0o600))
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(indexPath, []byte(
+		`{"sessionId":"session-outside","taskName":"Outside"}`+"\n",
+	), 0o600))
+	changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{
+		Path:      indexPath,
+		WatchRoot: root,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, changed)
 }

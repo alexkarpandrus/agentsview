@@ -295,7 +295,8 @@ func (s *junieParserState) session(
 			}
 		}
 	}
-	if len(messages) == 0 {
+	// Preserve empty projections so force replacement can clear stale messages.
+	if len(messages) == 0 && len(s.entries) == 0 && len(s.usageEvents) == 0 {
 		return nil, nil, nil
 	}
 

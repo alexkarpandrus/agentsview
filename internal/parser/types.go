@@ -1619,11 +1619,9 @@ func accumulateMessageTokenUsageContext(
 // usage-event set whenever events exist. Callers must only use it when
 // events are a superset of per-message token metadata — true for the
 // Antigravity gen_metadata and Junie model-usage parsers. Deriving totals
-// from events therefore also covers transcripts whose token-bearing steps
-// have no normalized message.
-// therefore covers transcripts that dropped steps (sidecar wins,
-// undecodable rows) without double counting. Message-derived totals
-// are kept where the events are silent.
+// from events covers token-bearing steps without normalized messages
+// (sidecar wins, undecodable rows) without double counting. Message-derived
+// totals are kept where the events are silent.
 //
 // Peak context counts the full context window per event: fresh input
 // plus cache-creation and cache-read tokens. That keeps event-derived

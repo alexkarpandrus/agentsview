@@ -42,6 +42,15 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	require.Zero(t, unchanged.Synced)
 	require.Equal(t, 1, unchanged.Skipped)
 
+	appendEvents := func(events string) {
+		t.Helper()
+		eventsFile, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, err)
+		_, err = eventsFile.WriteString(events)
+		require.NoError(t, err)
+		require.NoError(t, eventsFile.Close())
+	}
+
 	beforeStat, err := os.Stat(indexPath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(indexPath, []byte(afterIndex), 0o600))
@@ -50,26 +59,29 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, beforeStat.Size(), afterStat.Size())
 	require.Equal(t, beforeStat.ModTime(), afterStat.ModTime())
-	eventsFile, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0)
-	require.NoError(t, err)
-	_, err = eventsFile.WriteString(
-		`{"kind":"SessionA2uxEvent","taskId":"task-1","event":{"agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"response-1","text":"Final response"}},"timestampMs":1704067200900}` + "\n",
-	)
-	require.NoError(t, err)
-	require.NoError(t, eventsFile.Close())
 
-	updated := engine.SyncAll(t.Context(), nil)
-	require.Equal(t, 1, updated.Synced)
-	require.Zero(t, updated.Failed)
-
+	metadataUpdated := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 1, metadataUpdated.Synced)
+	require.Zero(t, metadataUpdated.Failed)
 	sess, err := database.GetSessionFull(t.Context(), "junie:session-one")
 	require.NoError(t, err)
 	require.NotNil(t, sess)
 	assert.Equal(t, "new", sess.Project)
 	require.NotNil(t, sess.SessionName)
 	assert.Equal(t, "after!", *sess.SessionName)
-
 	messages, err := database.GetMessages(t.Context(), "junie:session-one", 0, 100, true)
+	require.NoError(t, err)
+	require.Len(t, messages, 2)
+	assert.Equal(t, "Hello", messages[0].Content)
+	assert.Equal(t, "Draft response", messages[1].Content)
+
+	appendEvents(
+		`{"kind":"SessionA2uxEvent","taskId":"task-1","event":{"agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"response-1","text":"Final response"}},"timestampMs":1704067200900}` + "\n",
+	)
+	contentUpdated := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 1, contentUpdated.Synced)
+	require.Zero(t, contentUpdated.Failed)
+	messages, err = database.GetMessages(t.Context(), "junie:session-one", 0, 100, true)
 	require.NoError(t, err)
 	require.Len(t, messages, 2)
 	assert.Equal(t, "Hello", messages[0].Content)
@@ -84,6 +96,20 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	assert.Equal(t, 30, usage[0].CacheCreationInputTokens)
 	require.NotNil(t, usage[0].Cost)
 	assert.Equal(t, int64(1_250), usage[0].Cost.Microdollars)
+
+	appendEvents(
+		`{"kind":"UserMessagesDroppedFromHistory","userMessageIds":["req-1"],"timestampMs":1704067201000}` + "\n" +
+			`{"kind":"SessionA2uxEvent","taskId":"task-1","event":{"agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"response-1","text":""}},"timestampMs":1704067201100}` + "\n",
+	)
+	projectionCleared := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 1, projectionCleared.Synced)
+	require.Zero(t, projectionCleared.Failed)
+	messages, err = database.GetMessages(t.Context(), "junie:session-one", 0, 100, true)
+	require.NoError(t, err)
+	assert.Empty(t, messages)
+	usage, err = database.GetUsageEvents(t.Context(), "junie:session-one")
+	require.NoError(t, err)
+	require.Len(t, usage, 1)
 
 	unchanged = engine.SyncAll(t.Context(), nil)
 	require.Zero(t, unchanged.Synced)
@@ -100,9 +126,7 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	assertSourceMissingState(t, archived)
 	messages, err = database.GetMessages(t.Context(), "junie:session-one", 0, 100, true)
 	require.NoError(t, err)
-	require.Len(t, messages, 2)
-	assert.Equal(t, "Hello", messages[0].Content)
-	assert.Equal(t, "Final response", messages[1].Content)
+	assert.Empty(t, messages)
 	usage, err = database.GetUsageEvents(t.Context(), "junie:session-one")
 	require.NoError(t, err)
 	require.Len(t, usage, 1)
