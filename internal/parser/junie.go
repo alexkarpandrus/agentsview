@@ -22,6 +22,17 @@ type junieTranscriptMessage struct {
 	active bool
 }
 
+type junieParserState struct {
+	entries           []junieTranscriptMessage
+	userMessages      map[string]int
+	assistantMessages map[string]int
+	startedAt         time.Time
+	endedAt           time.Time
+	sessionName       string
+	sessionNameFound  bool
+	malformedLines    int
+}
+
 func parseJunieSession(
 	ctx context.Context, path, machine string,
 ) (*ParsedSession, []ParsedMessage, error) {
@@ -50,163 +61,173 @@ func parseJunieSessionWithSummary(
 		return nil, nil, fmt.Errorf("open %s: not a regular file", path)
 	}
 
-	sourceSessionID := filepath.Base(filepath.Dir(path))
-
+	state := junieParserState{
+		userMessages:      make(map[string]int),
+		assistantMessages: make(map[string]int),
+	}
 	lr := newLineReaderContext(ctx, f, maxLineSize)
 	defer releaseLineReader(lr)
-
-	var (
-		entries          []junieTranscriptMessage
-		startedAt        time.Time
-		endedAt          time.Time
-		sessionName      string
-		sessionNameFound bool
-		malformedLines   int
-		lineNumber       int
-	)
-	userMessages := make(map[string]int)
-	assistantMessages := make(map[string]int)
-
-	appendMessage := func(role RoleType, content string, timestamp time.Time) int {
-		entries = append(entries, junieTranscriptMessage{
-			ParsedMessage: ParsedMessage{
-				Role:          role,
-				Content:       content,
-				Timestamp:     timestamp,
-				IsSystem:      role == RoleSystem,
-				ContentLength: len(content),
-			},
-			active: strings.TrimSpace(content) != "",
-		})
-		return len(entries) - 1
-	}
-	setActive := func(ids gjson.Result, active bool) {
-		ids.ForEach(func(_, id gjson.Result) bool {
-			if index, ok := userMessages[id.Str]; ok {
-				entries[index].active = active
-			}
-			return true
-		})
-	}
-
-	for {
+	for lineNumber := 1; ; lineNumber++ {
 		line, ok := lr.next()
 		if !ok {
 			break
 		}
-		lineNumber++
 		if err := contextErrEvery(ctx, lineNumber); err != nil {
 			return nil, nil, err
 		}
 		if !gjson.Valid(line) {
-			malformedLines++
+			state.malformedLines++
 			continue
 		}
-
-		event := gjson.Parse(line)
-		timestamp := junieTimestamp(event.Get("timestampMs"))
-		if !timestamp.IsZero() {
-			if startedAt.IsZero() {
-				startedAt = timestamp
-			}
-			endedAt = timestamp
-		}
-
-		switch event.Get("kind").Str {
-		case "UserPromptEvent":
-			content := firstNonEmptyJSONLString(
-				event.Get("presentablePrompt").Str,
-				event.Get("prompt").Str,
-			)
-			requestID := event.Get("requestId").Str
-			active := event.Get("delivery").Str != "Failed" &&
-				strings.TrimSpace(content) != ""
-			if index, ok := userMessages[requestID]; requestID != "" && ok {
-				entries[index].Content = content
-				entries[index].ContentLength = len(content)
-				entries[index].Timestamp = timestamp
-				entries[index].active = active
-				continue
-			}
-			index := appendMessage(RoleUser, content, timestamp)
-			entries[index].active = active
-			if requestID != "" {
-				userMessages[requestID] = index
-			}
-
-		case "UserResponseEvent":
-			appendMessage(RoleUser, event.Get("prompt").Str, timestamp)
-
-		case "UserAsyncResponseEvent":
-			var responses []string
-			event.Get("entries").ForEach(func(_, entry gjson.Result) bool {
-				response := strings.TrimSpace(strings.Join([]string{
-					entry.Get("question").Str,
-					entry.Get("answer").Str,
-				}, "\n"))
-				if response != "" {
-					responses = append(responses, response)
-				}
-				return true
-			})
-			appendMessage(RoleUser, strings.Join(responses, "\n\n"), timestamp)
-
-		case "UserMessagesCommittedToHistory":
-			setActive(event.Get("userMessageIds"), true)
-
-		case "UserMessagesDroppedFromHistory", "UserMessagesFailedInHistory":
-			setActive(event.Get("userMessageIds"), false)
-
-		case "SessionTitleSetEvent":
-			sessionName = event.Get("name").Str
-			sessionNameFound = true
-
-		case "SystemMessageEvent":
-			text := strings.TrimSpace(event.Get("text").Str)
-			details := strings.TrimSpace(event.Get("details").Str)
-			if details != "" && details != text {
-				text = strings.TrimSpace(text + "\n\n" + details)
-			}
-			appendMessage(RoleSystem, text, timestamp)
-
-		case "AgentTaskFailedEvent":
-			appendMessage(RoleSystem, "Agent task failed", timestamp)
-
-		case "SessionA2uxEvent":
-			agentEvent := event.Get("event.agentEvent")
-			var content string
-			switch agentEvent.Get("kind").Str {
-			case "MarkdownBlockUpdatedEvent":
-				content = strings.TrimSpace(agentEvent.Get("text").Str)
-			case "ResultBlockUpdatedEvent":
-				content = strings.TrimSpace(strings.TrimPrefix(
-					agentEvent.Get("result").Str, "<!-- ANSWER -->",
-				))
-			default:
-				continue
-			}
-			stepID := agentEvent.Get("stepId").Str
-			if index, ok := assistantMessages[stepID]; stepID != "" && ok {
-				entries[index].Content = content
-				entries[index].ContentLength = len(content)
-				entries[index].Timestamp = timestamp
-				entries[index].active = content != ""
-				continue
-			}
-			index := appendMessage(RoleAssistant, content, timestamp)
-			if stepID != "" {
-				assistantMessages[stepID] = index
-			}
-		}
+		state.consumeEvent(gjson.Parse(line))
 	}
 	if err := lr.Err(); err != nil {
 		return nil, nil, fmt.Errorf("reading Junie session %s: %w", path, err)
 	}
+	return state.session(
+		ctx, path, machine, filepath.Base(filepath.Dir(path)),
+		info.Size(), info.ModTime().UnixNano(), summary, summaryPresent,
+	)
+}
 
-	messages := make([]ParsedMessage, 0, len(entries))
+func (s *junieParserState) consumeEvent(event gjson.Result) {
+	timestamp := junieTimestamp(event.Get("timestampMs"))
+	if !timestamp.IsZero() {
+		if s.startedAt.IsZero() {
+			s.startedAt = timestamp
+		}
+		s.endedAt = timestamp
+	}
+
+	switch event.Get("kind").Str {
+	case "UserPromptEvent":
+		s.consumeUserPrompt(event, timestamp)
+	case "UserResponseEvent":
+		s.appendMessage(RoleUser, event.Get("prompt").Str, timestamp)
+	case "UserAsyncResponseEvent":
+		s.consumeAsyncResponse(event, timestamp)
+	case "UserMessagesCommittedToHistory":
+		s.setUserMessagesActive(event.Get("userMessageIds"), true)
+	case "UserMessagesDroppedFromHistory", "UserMessagesFailedInHistory":
+		s.setUserMessagesActive(event.Get("userMessageIds"), false)
+	case "SessionTitleSetEvent":
+		s.sessionName = event.Get("name").Str
+		s.sessionNameFound = true
+	case "SystemMessageEvent":
+		s.consumeSystemMessage(event, timestamp)
+	case "AgentTaskFailedEvent":
+		s.appendMessage(RoleSystem, "Agent task failed", timestamp)
+	case "SessionA2uxEvent":
+		s.consumeA2UXEvent(event, timestamp)
+	}
+}
+
+func (s *junieParserState) consumeUserPrompt(event gjson.Result, timestamp time.Time) {
+	content := firstNonEmptyJSONLString(
+		event.Get("presentablePrompt").Str,
+		event.Get("prompt").Str,
+	)
+	requestID := event.Get("requestId").Str
+	active := event.Get("delivery").Str != "Failed" && strings.TrimSpace(content) != ""
+	if index, ok := s.userMessages[requestID]; requestID != "" && ok {
+		s.entries[index].Content = content
+		s.entries[index].ContentLength = len(content)
+		s.entries[index].Timestamp = timestamp
+		s.entries[index].active = active
+		return
+	}
+	index := s.appendMessage(RoleUser, content, timestamp)
+	s.entries[index].active = active
+	if requestID != "" {
+		s.userMessages[requestID] = index
+	}
+}
+
+func (s *junieParserState) consumeAsyncResponse(event gjson.Result, timestamp time.Time) {
+	var responses []string
+	event.Get("entries").ForEach(func(_, entry gjson.Result) bool {
+		response := strings.TrimSpace(strings.Join([]string{
+			entry.Get("question").Str,
+			entry.Get("answer").Str,
+		}, "\n"))
+		if response != "" {
+			responses = append(responses, response)
+		}
+		return true
+	})
+	s.appendMessage(RoleUser, strings.Join(responses, "\n\n"), timestamp)
+}
+
+func (s *junieParserState) consumeSystemMessage(event gjson.Result, timestamp time.Time) {
+	text := strings.TrimSpace(event.Get("text").Str)
+	details := strings.TrimSpace(event.Get("details").Str)
+	if details != "" && details != text {
+		text = strings.TrimSpace(text + "\n\n" + details)
+	}
+	s.appendMessage(RoleSystem, text, timestamp)
+}
+
+func (s *junieParserState) consumeA2UXEvent(event gjson.Result, timestamp time.Time) {
+	agentEvent := event.Get("event.agentEvent")
+	var content string
+	switch agentEvent.Get("kind").Str {
+	case "MarkdownBlockUpdatedEvent":
+		content = strings.TrimSpace(agentEvent.Get("text").Str)
+	case "ResultBlockUpdatedEvent":
+		content = strings.TrimSpace(strings.TrimPrefix(
+			agentEvent.Get("result").Str, "<!-- ANSWER -->",
+		))
+	default:
+		return
+	}
+	stepID := agentEvent.Get("stepId").Str
+	if index, ok := s.assistantMessages[stepID]; stepID != "" && ok {
+		s.entries[index].Content = content
+		s.entries[index].ContentLength = len(content)
+		s.entries[index].Timestamp = timestamp
+		s.entries[index].active = content != ""
+		return
+	}
+	index := s.appendMessage(RoleAssistant, content, timestamp)
+	if stepID != "" {
+		s.assistantMessages[stepID] = index
+	}
+}
+
+func (s *junieParserState) appendMessage(
+	role RoleType, content string, timestamp time.Time,
+) int {
+	s.entries = append(s.entries, junieTranscriptMessage{
+		ParsedMessage: ParsedMessage{
+			Role:          role,
+			Content:       content,
+			Timestamp:     timestamp,
+			IsSystem:      role == RoleSystem,
+			ContentLength: len(content),
+		},
+		active: strings.TrimSpace(content) != "",
+	})
+	return len(s.entries) - 1
+}
+
+func (s *junieParserState) setUserMessagesActive(ids gjson.Result, active bool) {
+	ids.ForEach(func(_, id gjson.Result) bool {
+		if index, ok := s.userMessages[id.Str]; ok {
+			s.entries[index].active = active
+		}
+		return true
+	})
+}
+
+func (s *junieParserState) session(
+	ctx context.Context, path, machine, sourceSessionID string,
+	fileSize, mtime int64,
+	summary junieSessionSummary, summaryPresent bool,
+) (*ParsedSession, []ParsedMessage, error) {
+	messages := make([]ParsedMessage, 0, len(s.entries))
 	firstMessage := ""
 	userCount := 0
-	for _, entry := range entries {
+	for _, entry := range s.entries {
 		if !entry.active || strings.TrimSpace(entry.Content) == "" {
 			continue
 		}
@@ -215,9 +236,7 @@ func parseJunieSessionWithSummary(
 		if entry.Role == RoleUser {
 			userCount++
 			if firstMessage == "" {
-				firstMessage = truncate(
-					strings.ReplaceAll(entry.Content, "\n", " "), 300,
-				)
+				firstMessage = truncate(strings.ReplaceAll(entry.Content, "\n", " "), 300)
 			}
 		}
 	}
@@ -226,17 +245,17 @@ func parseJunieSessionWithSummary(
 	}
 
 	if !summary.createdAt.IsZero() &&
-		(startedAt.IsZero() || summary.createdAt.Before(startedAt)) {
-		startedAt = summary.createdAt
+		(s.startedAt.IsZero() || summary.createdAt.Before(s.startedAt)) {
+		s.startedAt = summary.createdAt
 	}
-	if summary.updatedAt.After(endedAt) {
-		endedAt = summary.updatedAt
+	if summary.updatedAt.After(s.endedAt) {
+		s.endedAt = summary.updatedAt
 	}
-	if !sessionNameFound && summaryPresent {
-		sessionName = summary.taskName
+	if !s.sessionNameFound && summaryPresent {
+		s.sessionName = summary.taskName
 	}
-	if strings.TrimSpace(sessionName) != "" {
-		firstMessage = sessionName
+	if strings.TrimSpace(s.sessionName) != "" {
+		firstMessage = s.sessionName
 	}
 
 	project := ExtractProjectFromCwdWithBranchContext(
@@ -250,7 +269,7 @@ func parseJunieSessionWithSummary(
 		cwd = filepath.Clean(summary.projectDir)
 	}
 
-	sess := &ParsedSession{
+	session := &ParsedSession{
 		ID:                 "junie:" + sourceSessionID,
 		SourceSessionID:    sourceSessionID,
 		Project:            project,
@@ -258,20 +277,20 @@ func parseJunieSessionWithSummary(
 		Agent:              AgentJunie,
 		Cwd:                cwd,
 		FirstMessage:       firstMessage,
-		SessionName:        sessionName,
-		SessionNamePresent: sessionNameFound || summaryPresent,
-		StartedAt:          startedAt,
-		EndedAt:            endedAt,
+		SessionName:        s.sessionName,
+		SessionNamePresent: s.sessionNameFound || summaryPresent,
+		StartedAt:          s.startedAt,
+		EndedAt:            s.endedAt,
 		MessageCount:       len(messages),
 		UserMessageCount:   userCount,
-		MalformedLines:     malformedLines,
+		MalformedLines:     s.malformedLines,
 		File: FileInfo{
 			Path:  path,
-			Size:  info.Size(),
-			Mtime: info.ModTime().UnixNano(),
+			Size:  fileSize,
+			Mtime: mtime,
 		},
 	}
-	return sess, messages, nil
+	return session, messages, nil
 }
 
 func loadJunieSessionSummary(
