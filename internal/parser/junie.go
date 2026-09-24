@@ -3,7 +3,6 @@ package parser
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,21 +25,32 @@ type junieTranscriptMessage struct {
 func parseJunieSession(
 	ctx context.Context, path, machine string,
 ) (*ParsedSession, []ParsedMessage, error) {
-	info, err := os.Stat(path)
+	sessionID := filepath.Base(filepath.Dir(path))
+	summary, present, err := loadJunieSessionSummary(ctx, path, sessionID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
+		return nil, nil, err
 	}
-	f, err := os.Open(path)
+	return parseJunieSessionWithSummary(ctx, path, machine, summary, present)
+}
+
+func parseJunieSessionWithSummary(
+	ctx context.Context, path, machine string,
+	summary junieSessionSummary, summaryPresent bool,
+) (*ParsedSession, []ParsedMessage, error) {
+	f, err := openNoFollow(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("open %s: not a regular file", path)
+	}
 
 	sourceSessionID := filepath.Base(filepath.Dir(path))
-	summary, summaryPresent, err := loadJunieSessionSummary(ctx, path, sourceSessionID)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	lr := newLineReaderContext(ctx, f, maxLineSize)
 	defer releaseLineReader(lr)
@@ -63,6 +73,7 @@ func parseJunieSession(
 				Role:          role,
 				Content:       content,
 				Timestamp:     timestamp,
+				IsSystem:      role == RoleSystem,
 				ContentLength: len(content),
 			},
 			active: strings.TrimSpace(content) != "",
@@ -214,10 +225,11 @@ func parseJunieSession(
 		return nil, nil, nil
 	}
 
-	if !summary.createdAt.IsZero() {
+	if !summary.createdAt.IsZero() &&
+		(startedAt.IsZero() || summary.createdAt.Before(startedAt)) {
 		startedAt = summary.createdAt
 	}
-	if !summary.updatedAt.IsZero() {
+	if summary.updatedAt.After(endedAt) {
 		endedAt = summary.updatedAt
 	}
 	if !sessionNameFound && summaryPresent {
@@ -266,44 +278,24 @@ func loadJunieSessionSummary(
 	ctx context.Context, eventsPath, sessionID string,
 ) (junieSessionSummary, bool, error) {
 	indexPath := filepath.Join(filepath.Dir(filepath.Dir(eventsPath)), "index.jsonl")
-	f, err := os.Open(indexPath)
-	if os.IsNotExist(err) {
+	summaries, present, err := loadJunieIndexSnapshot(ctx, indexPath)
+	if err != nil || !present {
+		return junieSessionSummary{}, false, err
+	}
+	line, found := summaries[sessionID]
+	if !found {
 		return junieSessionSummary{}, false, nil
 	}
-	if err != nil {
-		return junieSessionSummary{}, false, fmt.Errorf("open Junie index %s: %w", indexPath, err)
-	}
-	defer f.Close()
+	return parseJunieSessionSummary(line), true, nil
+}
 
-	lr := newLineReaderContext(ctx, f, maxLineSize)
-	defer releaseLineReader(lr)
-	lineNumber := 0
-	var summary junieSessionSummary
-	found := false
-	for {
-		line, ok := lr.next()
-		if !ok {
-			break
-		}
-		lineNumber++
-		if err := contextErrEvery(ctx, lineNumber); err != nil {
-			return junieSessionSummary{}, false, err
-		}
-		if !gjson.Valid(line) || gjson.Get(line, "sessionId").Str != sessionID {
-			continue
-		}
-		summary = junieSessionSummary{
-			projectDir: gjson.Get(line, "projectDir").Str,
-			taskName:   gjson.Get(line, "taskName").Str,
-			createdAt:  junieTimestamp(gjson.Get(line, "createdAt")),
-			updatedAt:  junieTimestamp(gjson.Get(line, "updatedAt")),
-		}
-		found = true
+func parseJunieSessionSummary(line string) junieSessionSummary {
+	return junieSessionSummary{
+		projectDir: gjson.Get(line, "projectDir").Str,
+		taskName:   gjson.Get(line, "taskName").Str,
+		createdAt:  junieTimestamp(gjson.Get(line, "createdAt")),
+		updatedAt:  junieTimestamp(gjson.Get(line, "updatedAt")),
 	}
-	if err := lr.Err(); err != nil {
-		return junieSessionSummary{}, false, fmt.Errorf("reading Junie index %s: %w", indexPath, err)
-	}
-	return summary, found, nil
 }
 
 func junieTimestamp(value gjson.Result) time.Time {
