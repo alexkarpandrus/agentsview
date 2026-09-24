@@ -255,6 +255,8 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(indexPath, []byte(after.String()), 0o600))
 			provider = factory.NewProvider(cfg)
+			_, err = provider.WatchPlan(t.Context())
+			require.NoError(t, err)
 
 			changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{
 				Path:      indexPath,

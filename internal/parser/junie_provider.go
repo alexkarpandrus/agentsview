@@ -84,9 +84,6 @@ func (s junieSourceSet) WatchPlan(ctx context.Context) (WatchPlan, error) {
 	for i := range plan.Roots {
 		plan.Roots[i].IncludeGlobs = append(plan.Roots[i].IncludeGlobs, "index.jsonl")
 	}
-	if err := s.refreshJunieIndexes(ctx); err != nil {
-		return WatchPlan{}, err
-	}
 	return plan, nil
 }
 
