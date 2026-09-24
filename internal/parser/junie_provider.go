@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,6 +92,9 @@ func (s junieSourceSet) SourcesForChangedPath(
 		return nil, nil
 	}
 
+	// SessionStore atomically rewrites the full index, so a watcher event cannot
+	// identify the changed row. Read that metadata file once, then return only
+	// the session transcripts whose summaries changed.
 	s.indexCache.mu.Lock()
 	current, present, err := loadJunieIndexSnapshot(ctx, indexPath)
 	if err != nil {
@@ -132,14 +137,34 @@ func (s junieSourceSet) SourcesForChangedPath(
 func (s junieSourceSet) Fingerprint(
 	ctx context.Context, source SourceRef,
 ) (SourceFingerprint, error) {
-	fingerprint, err := s.JSONLSourceSet.Fingerprint(ctx, source)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return SourceFingerprint{}, err
 	}
 	src, ok := source.Opaque.(JSONLSource)
 	if !ok {
-		return fingerprint, nil
+		return SourceFingerprint{}, errors.New("junie source path unavailable")
 	}
+	f, err := openJunieEventStream(src.Path)
+	if err != nil {
+		return SourceFingerprint{}, fmt.Errorf("open %s: %w", src.Path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return SourceFingerprint{}, fmt.Errorf("stat %s: %w", src.Path, err)
+	}
+	inode, device := sourceFileIdentity(info)
+	h := sha256.New()
+	if _, err := io.Copy(h, checkedContextReader{ctx: ctx, reader: f}); err != nil {
+		return SourceFingerprint{}, fmt.Errorf("hash %s: %w", src.Path, err)
+	}
+	fingerprint := SourceFingerprint{
+		Key:  firstNonEmptyJSONLString(source.FingerprintKey, source.Key, src.Path),
+		Hash: hex.EncodeToString(h.Sum(nil)),
+		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
+		Inode: inode, Device: device,
+	}
+
 	indexPath := filepath.Join(filepath.Dir(filepath.Dir(src.Path)), "index.jsonl")
 	summaries, err := s.indexCache.snapshot(ctx, indexPath)
 	if err != nil {

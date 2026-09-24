@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -36,22 +37,54 @@ type junieParserState struct {
 	malformedLines    int
 }
 
-func parseJunieSession(
-	ctx context.Context, path, machine string,
-) (*ParsedSession, []ParsedMessage, error) {
-	sessionID := filepath.Base(filepath.Dir(path))
-	summary, present, err := loadJunieSessionSummary(ctx, path, sessionID)
+func openJunieEventStream(path string) (*os.File, error) {
+	path = filepath.Clean(path)
+	sessionDir := filepath.Dir(path)
+	root, err := os.OpenRoot(filepath.Dir(sessionDir))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return parseJunieSessionWithSummary(ctx, path, machine, summary, present)
+	defer root.Close()
+
+	sessionName := filepath.Base(sessionDir)
+	dirInfo, err := root.Lstat(sessionName)
+	if err != nil {
+		return nil, err
+	}
+	if !dirInfo.IsDir() {
+		return nil, fmt.Errorf("session directory is not a directory")
+	}
+
+	relativePath := filepath.Join(sessionName, filepath.Base(path))
+	info, err := root.Lstat(relativePath)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("session event stream is not a regular file")
+	}
+
+	f, err := root.Open(relativePath)
+	if err != nil {
+		return nil, err
+	}
+	openedInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("opened session event stream is not a regular file")
+	}
+	return f, nil
 }
 
 func parseJunieSessionWithSummary(
 	ctx context.Context, path, machine string,
 	summary junieSessionSummary, summaryPresent bool,
 ) (*ParsedSession, []ParsedMessage, error) {
-	f, err := openNoFollow(path)
+	f, err := openJunieEventStream(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -295,8 +328,9 @@ func (s *junieParserState) session(
 			}
 		}
 	}
-	// Preserve empty projections so force replacement can clear stale messages.
-	if len(messages) == 0 && len(s.entries) == 0 && len(s.usageEvents) == 0 {
+	// Preserve recognized empty projections so force replacement can clear stale messages.
+	// A wholly empty or unrecognized stream may be a partial rewrite and stays skipped.
+	if len(messages) == 0 && len(s.entries) == 0 && len(s.usageEvents) == 0 && !s.sessionNameFound {
 		return nil, nil, nil
 	}
 
@@ -349,21 +383,6 @@ func (s *junieParserState) session(
 	applyUsageEventTokenTotals(session, s.usageEvents)
 	session.UsageEvents = s.usageEvents
 	return session, messages, nil
-}
-
-func loadJunieSessionSummary(
-	ctx context.Context, eventsPath, sessionID string,
-) (junieSessionSummary, bool, error) {
-	indexPath := filepath.Join(filepath.Dir(filepath.Dir(eventsPath)), "index.jsonl")
-	summaries, present, err := loadJunieIndexSnapshot(ctx, indexPath)
-	if err != nil || !present {
-		return junieSessionSummary{}, false, err
-	}
-	line, found := summaries[sessionID]
-	if !found {
-		return junieSessionSummary{}, false, nil
-	}
-	return parseJunieSessionSummary(line), true, nil
 }
 
 func parseJunieSessionSummary(line string) junieSessionSummary {

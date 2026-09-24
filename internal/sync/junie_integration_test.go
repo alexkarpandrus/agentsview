@@ -133,3 +133,42 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	require.NotNil(t, usage[0].Cost)
 	assert.Equal(t, int64(1_250), usage[0].Cost.Microdollars)
 }
+
+func TestSyncJunieTitleOnlyRewriteClearsMessages(t *testing.T) {
+	root := t.TempDir()
+	sessionDir := filepath.Join(root, "session-title-only")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	require.NoError(t, os.WriteFile(eventsPath, []byte(
+		`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"Remove me","timestampMs":1704067200000}`+"\n",
+	), 0o600))
+
+	database := openTestDB(t)
+	engine := NewEngine(t.Context(), database, EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+		Machine:   "test",
+	})
+	t.Cleanup(engine.Close)
+
+	first := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 1, first.Synced)
+	require.Zero(t, first.Failed)
+	messages, err := database.GetMessages(t.Context(), "junie:session-title-only", 0, 100, true)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+
+	require.NoError(t, os.WriteFile(eventsPath, []byte(
+		`{"kind":"SessionTitleSetEvent","name":"Title only","timestampMs":1704067201000}`+"\n",
+	), 0o600))
+	updated := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 1, updated.Synced)
+	require.Zero(t, updated.Failed)
+	messages, err = database.GetMessages(t.Context(), "junie:session-title-only", 0, 100, true)
+	require.NoError(t, err)
+	assert.Empty(t, messages)
+	sess, err := database.GetSessionFull(t.Context(), "junie:session-title-only")
+	require.NoError(t, err)
+	require.NotNil(t, sess)
+	require.NotNil(t, sess.SessionName)
+	assert.Equal(t, "Title only", *sess.SessionName)
+}

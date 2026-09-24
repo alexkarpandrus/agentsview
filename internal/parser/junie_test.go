@@ -13,6 +13,35 @@ import (
 	"go.kenn.io/agentsview/internal/money"
 )
 
+func parseJunieProviderSession(
+	t *testing.T, path, machine string,
+) (*ParsedSession, []ParsedMessage) {
+	t.Helper()
+	root := filepath.Dir(filepath.Dir(path))
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	sources, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+	var source SourceRef
+	found := false
+	for _, candidate := range sources {
+		if samePath(candidate.DisplayPath, path) {
+			source, found = candidate, true
+			break
+		}
+	}
+	require.True(t, found, "Junie source %s was not discovered", path)
+	fingerprint, err := provider.Fingerprint(t.Context(), source)
+	require.NoError(t, err)
+	outcome, err := provider.Parse(t.Context(), ParseRequest{
+		Source: source, Fingerprint: fingerprint, Machine: machine,
+	})
+	require.NoError(t, err)
+	require.Len(t, outcome.Results, 1)
+	result := outcome.Results[0].Result
+	return &result.Session, result.Messages
+}
+
 func TestParseJunieSession(t *testing.T) {
 	root := t.TempDir()
 	sessionID := "session-260101-120000-abcd"
@@ -48,9 +77,7 @@ func TestParseJunieSession(t *testing.T) {
 	path := filepath.Join(sessionDir, "events.jsonl")
 	require.NoError(t, os.WriteFile(path, events, 0o600))
 
-	sess, messages, err := parseJunieSession(t.Context(), path, "local")
-	require.NoError(t, err)
-	require.NotNil(t, sess)
+	sess, messages := parseJunieProviderSession(t, path, "local")
 
 	assert.Equal(t, "junie:"+sessionID, sess.ID)
 	assert.Equal(t, sessionID, sess.SourceSessionID)
@@ -271,26 +298,22 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 	}
 }
 
-func TestParseJunieSessionWithoutIndexUsesEventMetadata(t *testing.T) {
+func TestParseJunieTitleOnlySessionWithoutIndex(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session-fallback", "events.jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(
-		`{"kind":"SessionTitleSetEvent","name":"Fallback title","timestampMs":1704067200000}`+"\n"+
-			`{"kind":"SystemMessageEvent","text":"Ready","timestampMs":1704067201000}`+"\n",
+		`{"kind":"SessionTitleSetEvent","name":"Fallback title","timestampMs":1704067200000}`+"\n",
 	), 0o600))
 
-	sess, messages, err := parseJunieSession(t.Context(), path, "local")
-	require.NoError(t, err)
-	require.NotNil(t, sess)
+	sess, messages := parseJunieProviderSession(t, path, "local")
 	assert.Equal(t, "junie", sess.Project)
 	assert.Empty(t, sess.Cwd)
 	assert.Equal(t, "Fallback title", sess.SessionName)
 	assert.Equal(t, "Fallback title", sess.FirstMessage)
 	assert.Equal(t, time.UnixMilli(1704067200000), sess.StartedAt)
-	assert.Equal(t, time.UnixMilli(1704067201000), sess.EndedAt)
-	require.Len(t, messages, 1)
-	assertMessage(t, messages[0], RoleSystem, "Ready")
+	assert.Equal(t, time.UnixMilli(1704067200000), sess.EndedAt)
+	assert.Empty(t, messages)
 }
 
 func TestParseJunieSessionIgnoresSymlinkedIndex(t *testing.T) {
@@ -309,9 +332,7 @@ func TestParseJunieSessionIgnoresSymlinkedIndex(t *testing.T) {
 		`{"kind":"UserResponseEvent","prompt":"Safe","timestampMs":1704067201000}`+"\n",
 	), 0o600))
 
-	sess, _, err := parseJunieSession(t.Context(), path, "local")
-	require.NoError(t, err)
-	require.NotNil(t, sess)
+	sess, _ := parseJunieProviderSession(t, path, "local")
 	assert.Equal(t, "junie", sess.Project)
 	assert.Empty(t, sess.Cwd)
 	assert.Empty(t, sess.SessionName)
@@ -343,4 +364,37 @@ func TestJunieIndexChangeIgnoresSymlinkedSessionDirectory(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Empty(t, changed)
+}
+
+func TestJunieSessionDirectorySwapCannotEscapeRoot(t *testing.T) {
+	root := t.TempDir()
+	sessionDir := filepath.Join(root, "session-safe")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
+		`{"kind":"UserPromptEvent","requestId":"safe","prompt":"Safe"}`+"\n",
+	), 0o600))
+
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	sources, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+	fingerprint, err := provider.Fingerprint(t.Context(), sources[0])
+	require.NoError(t, err)
+
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "events.jsonl"), []byte(
+		`{"kind":"UserPromptEvent","requestId":"outside","prompt":"Outside"}`+"\n",
+	), 0o600))
+	require.NoError(t, os.RemoveAll(sessionDir))
+	if err := os.Symlink(outside, sessionDir); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err = provider.Fingerprint(t.Context(), sources[0])
+	require.ErrorContains(t, err, "session directory is not a directory")
+	_, err = provider.Parse(t.Context(), ParseRequest{
+		Source: sources[0], Fingerprint: fingerprint, Machine: "local",
+	})
+	require.ErrorContains(t, err, "session directory is not a directory")
 }
