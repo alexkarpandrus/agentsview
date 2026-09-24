@@ -66,7 +66,7 @@ func TestParseJunieSession(t *testing.T) {
 			`{"kind":"AgentTaskFailedEvent","timestampMs":1704067205600}` + "\n" +
 			`{"kind":"UserAsyncResponseEvent","entries":[{"question":"Continue?","answer":"Yes"}],"timestampMs":1704067206000}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"COMPLETED","agentEvent":{"kind":"ResultBlockUpdatedEvent","stepId":"step-2","cancelled":false,"result":"Finished","changes":[]}},"timestampMs":1704067207000}` + "\n" +
-			"{\n",
+			"{\n" + `{}` + "\n",
 	)
 	path := filepath.Join(sessionDir, "events.jsonl")
 	require.NoError(t, os.WriteFile(path, events, 0o600))
@@ -129,8 +129,8 @@ func TestParseJunieSessionRejectsInvalidReportedCost(t *testing.T) {
 		`{"kind":"SessionA2uxEvent","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"test","cost":-1}]}}}`+"\n",
 	), 0o600))
 
-	_, _, err := parseJunieSessionWithSummary(
-		t.Context(), path, "session-one", junieSessionSummary{}, false, openJunieRoot,
+	_, _, _, err := parseJunieSessionWithSummary(
+		t.Context(), path, "session-one", junieSessionSummary{}, false, (&junieIndexCache{}).openRoot,
 	)
 	require.ErrorContains(t, err, "invalid model usage cost")
 }
@@ -332,7 +332,7 @@ func TestParseJunieTitleOnlySessionWithoutIndex(t *testing.T) {
 	assert.Empty(t, messages)
 }
 
-func TestParseJunieSessionIgnoresSymlinkedIndex(t *testing.T) {
+func TestParseJunieSessionRejectsSymlinkedIndex(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "outside-index.jsonl")
 	require.NoError(t, os.WriteFile(target, []byte(
@@ -348,10 +348,10 @@ func TestParseJunieSessionIgnoresSymlinkedIndex(t *testing.T) {
 		`{"kind":"UserResponseEvent","prompt":"Safe","timestampMs":1704067201000}`+"\n",
 	), 0o600))
 
-	sess, _ := parseJunieProviderSession(t, path, "local")
-	assert.Equal(t, "junie", sess.Project)
-	assert.Empty(t, sess.Cwd)
-	assert.Empty(t, sess.SessionName)
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.ErrorContains(t, err, "is not a regular file")
 }
 
 func TestJunieIndexChangeIgnoresSymlinkedSessionDirectory(t *testing.T) {
@@ -474,4 +474,155 @@ func TestJunieConfiguredRootIdentityIsPinned(t *testing.T) {
 
 	_, err = provider.Fingerprint(t.Context(), sources[0])
 	require.ErrorContains(t, err, "Junie root identity changed")
+}
+
+func TestJunieDiscoveryRepinsRecreatedConfiguredRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "configured")
+	writeSession := func(prompt string) {
+		t.Helper()
+		path := filepath.Join(root, "session-safe", "events.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(fmt.Sprintf(
+			`{"kind":"UserPromptEvent","requestId":"request","prompt":%q}`+"\n", prompt,
+		)), 0o600))
+	}
+	writeSession("Before")
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+
+	require.NoError(t, os.Rename(root, filepath.Join(parent, "moved")))
+	_, err = provider.Discover(t.Context())
+	require.ErrorContains(t, err, "temporarily unavailable")
+	writeSession("After")
+	sources, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+	fingerprint, err := provider.Fingerprint(t.Context(), sources[0])
+	require.NoError(t, err)
+	outcome, err := provider.Parse(t.Context(), ParseRequest{
+		Source: sources[0], Fingerprint: fingerprint, Machine: "local",
+	})
+	require.NoError(t, err)
+	require.Len(t, outcome.Results, 1)
+	assert.Equal(t, "After", outcome.Results[0].Result.Session.FirstMessage)
+}
+
+func TestJunieFindSourceRefreshesIndexSummary(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-one", "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"kind":"UserPromptEvent","requestId":"request","prompt":"Prompt"}`+"\n",
+	), 0o600))
+	indexPath := filepath.Join(root, "index.jsonl")
+	require.NoError(t, os.WriteFile(indexPath, []byte(
+		`{"sessionId":"session-one","taskName":"Before"}`+"\n",
+	), 0o600))
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(indexPath, []byte(
+		`{"sessionId":"session-one","taskName":"After"}`+"\n",
+	), 0o600))
+	source, found, err := provider.FindSource(t.Context(), FindSourceRequest{StoredFilePath: path})
+	require.NoError(t, err)
+	require.True(t, found)
+	fingerprint, err := provider.Fingerprint(t.Context(), source)
+	require.NoError(t, err)
+	outcome, err := provider.Parse(t.Context(), ParseRequest{
+		Source: source, Fingerprint: fingerprint, Machine: "local",
+	})
+	require.NoError(t, err)
+	require.Len(t, outcome.Results, 1)
+	assert.Equal(t, "After", outcome.Results[0].Result.Session.SessionName)
+}
+
+func TestJunieIncompleteIndexDoesNotReplaceCachedSnapshot(t *testing.T) {
+	root := t.TempDir()
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		path := filepath.Join(root, sessionID, "events.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+	}
+	indexPath := filepath.Join(root, "index.jsonl")
+	before := `{"sessionId":"session-a","taskName":"Before"}` + "\n" +
+		`{"sessionId":"session-b","taskName":"Stable"}` + "\n"
+	require.NoError(t, os.WriteFile(indexPath, []byte(before), 0o600))
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(indexPath, []byte(
+		`{"sessionId":"session-a","taskName":"After"}`+"\n"+"{\n",
+	), 0o600))
+	_, err = provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+	require.ErrorContains(t, err, "invalid JSON")
+
+	after := `{"sessionId":"session-a","taskName":"After"}` + "\n" +
+		`{"sessionId":"session-b","taskName":"Stable"}` + "\n"
+	require.NoError(t, os.WriteFile(indexPath, []byte(after), 0o600))
+	changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+	require.NoError(t, err)
+	require.Len(t, changed, 1)
+	assert.Equal(t, "session-a", changed[0].ProjectHint)
+}
+
+func TestJunieIndexRetriesAccumulateUntilAcknowledged(t *testing.T) {
+	root := t.TempDir()
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		path := filepath.Join(root, sessionID, "events.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+	}
+	indexPath := filepath.Join(root, "index.jsonl")
+	writeIndex := func(a, b string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(indexPath, []byte(
+			fmt.Sprintf(`{"sessionId":"session-a","taskName":%q}`+"\n"+`{"sessionId":"session-b","taskName":%q}`+"\n", a, b),
+		), 0o600))
+	}
+	writeIndex("Before", "Before")
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+
+	writeIndex("After", "Before")
+	changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+	require.NoError(t, err)
+	require.Len(t, changed, 1)
+	writeIndex("After", "After")
+	changed, err = provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+	require.NoError(t, err)
+	require.Len(t, changed, 2)
+	assert.Equal(t, []string{"session-a", "session-b"}, []string{changed[0].ProjectHint, changed[1].ProjectHint})
+
+	acknowledger := provider.(SourceSyncAcknowledger)
+	acknowledger.AcknowledgeSourceSync(changed[0])
+	retry, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+	require.NoError(t, err)
+	require.Len(t, retry, 1)
+	assert.Equal(t, "session-b", retry[0].ProjectHint)
+}
+
+func TestOpenJuniePinnedFileRejectsReplacement(t *testing.T) {
+	rootPath := t.TempDir()
+	path := filepath.Join(rootPath, "events.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("before"), 0o600))
+	expected, err := os.Lstat(path)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(path, filepath.Join(rootPath, "old-events.jsonl")))
+	require.NoError(t, os.WriteFile(path, []byte("after"), 0o600))
+	root, err := os.OpenRoot(rootPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+
+	_, err = openJuniePinnedFile(root, "events.jsonl", expected)
+	require.ErrorContains(t, err, "changed while opening")
 }

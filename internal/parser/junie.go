@@ -39,28 +39,28 @@ type junieParserState struct {
 
 type junieRootOpener func(string) (*os.Root, error)
 
-func openJunieRoot(path string) (*os.Root, error) {
+func openValidatedJunieRoot(path string) (*os.Root, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("Junie root is not a directory")
+		return nil, nil, fmt.Errorf("Junie root is not a directory")
 	}
 	root, err := os.OpenRoot(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	openedInfo, err := root.Stat(".")
 	if err != nil {
 		_ = root.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if !os.SameFile(info, openedInfo) {
 		_ = root.Close()
-		return nil, fmt.Errorf("Junie root changed while opening")
+		return nil, nil, fmt.Errorf("Junie root changed while opening")
 	}
-	return root, nil
+	return root, openedInfo, nil
 }
 
 func openJunieEventStream(path string, openRoot junieRootOpener) (*os.File, error) {
@@ -90,7 +90,15 @@ func openJunieEventStream(path string, openRoot junieRootOpener) (*os.File, erro
 		return nil, fmt.Errorf("session event stream is not a regular file")
 	}
 
-	f, err := root.Open(relativePath)
+	f, err := openJuniePinnedFile(root, relativePath, info)
+	if err != nil {
+		return nil, fmt.Errorf("session event stream: %w", err)
+	}
+	return f, nil
+}
+
+func openJuniePinnedFile(root *os.Root, name string, expected os.FileInfo) (*os.File, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -99,9 +107,9 @@ func openJunieEventStream(path string, openRoot junieRootOpener) (*os.File, erro
 		_ = f.Close()
 		return nil, err
 	}
-	if !openedInfo.Mode().IsRegular() {
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(expected, openedInfo) {
 		_ = f.Close()
-		return nil, fmt.Errorf("opened session event stream is not a regular file")
+		return nil, fmt.Errorf("file changed while opening")
 	}
 	return f, nil
 }
@@ -110,15 +118,15 @@ func parseJunieSessionWithSummary(
 	ctx context.Context, path, machine string,
 	summary junieSessionSummary, summaryPresent bool,
 	openRoot junieRootOpener,
-) (*ParsedSession, []ParsedMessage, error) {
+) (*ParsedSession, []ParsedMessage, bool, error) {
 	f, err := openJunieEventStream(path, openRoot)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, nil, false, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
+		return nil, nil, false, fmt.Errorf("stat %s: %w", path, err)
 	}
 
 	state := junieParserState{
@@ -128,29 +136,33 @@ func parseJunieSessionWithSummary(
 	}
 	lr := newLineReaderContext(ctx, f, maxLineSize)
 	defer releaseLineReader(lr)
+	lastLineMalformed := false
 	for lineNumber := 1; ; lineNumber++ {
 		line, ok := lr.next()
 		if !ok {
 			break
 		}
 		if err := contextErrEvery(ctx, lineNumber); err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		if !gjson.Valid(line) {
 			state.malformedLines++
+			lastLineMalformed = true
 			continue
 		}
+		lastLineMalformed = false
 		if err := state.consumeEvent(gjson.Parse(line), lineNumber); err != nil {
-			return nil, nil, fmt.Errorf("parsing Junie session %s line %d: %w", path, lineNumber, err)
+			return nil, nil, false, fmt.Errorf("parsing Junie session %s line %d: %w", path, lineNumber, err)
 		}
 	}
 	if err := lr.Err(); err != nil {
-		return nil, nil, fmt.Errorf("reading Junie session %s: %w", path, err)
+		return nil, nil, false, fmt.Errorf("reading Junie session %s: %w", path, err)
 	}
-	return state.session(
+	sess, messages, err := state.session(
 		ctx, path, machine, filepath.Base(filepath.Dir(path)),
 		info.Size(), info.ModTime().UnixNano(), summary, summaryPresent,
 	)
+	return sess, messages, !lastLineMalformed, err
 }
 
 func (s *junieParserState) consumeEvent(event gjson.Result, lineNumber int) error {

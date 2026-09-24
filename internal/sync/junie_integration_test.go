@@ -162,6 +162,7 @@ func TestSyncJuniePartialAndTitleOnlyRewrites(t *testing.T) {
 	for _, rewrite := range [][]byte{
 		nil,
 		[]byte(`{"kind":"UnknownEvent","timestampMs":1704067200500}` + "\n"),
+		[]byte(`{"kind":"UserPromptEvent","requestId":"req-2","prompt":"Partial replacement","timestampMs":1704067200600}` + "\n{\n"),
 	} {
 		require.NoError(t, os.WriteFile(eventsPath, rewrite, 0o600))
 		skipped := engine.SyncAll(t.Context(), nil)
@@ -232,11 +233,42 @@ func TestJunieIndexChangedPathWorkIsArchiveBounded(t *testing.T) {
 			require.Equal(t, sessionCount, first.Synced)
 			require.Zero(t, first.Failed)
 
-			writeIndex("After", false)
+			statusOnlyIndex := strings.ReplaceAll(
+				func() string {
+					var index strings.Builder
+					for i := range sessionCount {
+						sessionID := fmt.Sprintf("session-%03d", i)
+						title := "Unchanged"
+						if i == 0 {
+							title = "Before"
+						}
+						fmt.Fprintf(&index, `{"sessionId":%q,"projectDir":%q,"taskName":%q,"createdAt":1704067200000,"updatedAt":1704067201000,"status":"RUNNING"}`+"\n", sessionID, "/work/"+sessionID, title)
+					}
+					return index.String()
+				}(), `"status":"RUNNING"`, `"status":"DONE"`,
+			)
+			require.NoError(t, os.WriteFile(indexPath, []byte(statusOnlyIndex), 0o600))
 			plan, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			assert.Empty(t, plan.Files, "irrelevant index fields must not schedule session work")
+			assert.Empty(t, plan.FallbackProviders, "classified no-op index rewrites must not trigger archive discovery")
+
+			writeIndex("After", false)
+			plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
 			require.NoError(t, err)
 			require.Len(t, plan.Files, 1, "one index-row change must select one session regardless of archive size")
 			assert.Empty(t, plan.FallbackProviders)
+			engine.writeBatchOverride = func(batch []pendingWrite, _ syncWriteMode, _ bool) (int, int, int, int) {
+				return 0, 0, len(batch), 0
+			}
+			failed, err := engine.SyncChangedPathPlanContext(t.Context(), plan, nil)
+			require.Error(t, err)
+			require.Equal(t, 1, failed.Stats.Failed)
+
+			plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			require.Len(t, plan.Files, 1, "failed persistence must retain the session for retry")
+			engine.writeBatchOverride = nil
 			result, err := engine.SyncChangedPathPlanContext(t.Context(), plan, nil)
 			require.NoError(t, err)
 			require.Equal(t, 1, result.FilesProcessed)
@@ -245,6 +277,11 @@ func TestJunieIndexChangedPathWorkIsArchiveBounded(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, sess.SessionName)
 			assert.Equal(t, "After", *sess.SessionName)
+
+			plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			assert.Empty(t, plan.Files, "successful persistence must acknowledge pending index work")
+			assert.Empty(t, plan.FallbackProviders)
 
 			writeIndex("", true)
 			plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
