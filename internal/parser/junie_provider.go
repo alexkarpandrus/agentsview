@@ -310,6 +310,10 @@ func (c *junieIndexCache) parseFile(
 func junieProviderCapabilities() Capabilities {
 	return Capabilities{
 		Source: jsonlFileProviderSourceCapabilities(),
+		Sync: ProviderSyncSemantics{
+			FingerprintHashInCacheKey:           true,
+			FingerprintHashRequiredForFreshness: true,
+		},
 		Content: ContentCapabilities{
 			FirstMessage:       CapabilitySupported,
 			SessionName:        CapabilitySupported,

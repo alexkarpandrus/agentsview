@@ -202,6 +202,18 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 			sources := newJunieSourceSet([]string{root})
 			_, err := sources.WatchPlan(t.Context())
 			require.NoError(t, err)
+			discovered, err := sources.Discover(t.Context())
+			require.NoError(t, err)
+			var changedSource *SourceRef
+			for i := range discovered {
+				if discovered[i].ProjectHint == changedID {
+					changedSource = &discovered[i]
+					break
+				}
+			}
+			require.NotNil(t, changedSource)
+			beforeFingerprint, err := sources.Fingerprint(t.Context(), *changedSource)
+			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(indexPath, []byte(after.String()), 0o600))
 
 			changed, err := sources.SourcesForChangedPath(t.Context(), ChangedPathRequest{
@@ -211,6 +223,10 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, changed, 1)
 			assert.Equal(t, changedID, changed[0].ProjectHint)
+			afterFingerprint, err := sources.Fingerprint(t.Context(), changed[0])
+			require.NoError(t, err)
+			assert.Equal(t, beforeFingerprint.Size, afterFingerprint.Size)
+			assert.NotEqual(t, beforeFingerprint.Hash, afterFingerprint.Hash)
 		})
 	}
 }
