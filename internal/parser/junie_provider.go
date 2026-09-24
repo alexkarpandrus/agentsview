@@ -34,12 +34,6 @@ func newJunieProviderFactory(def AgentDef) ProviderFactory {
 	)
 }
 
-func newJunieSourceSet(roots []string) junieSourceSet {
-	return newJunieSourceSetWithCache(roots, &junieIndexCache{
-		summaries: make(map[string]map[string]string),
-	})
-}
-
 func newJunieSourceSetWithCache(
 	roots []string, indexCache *junieIndexCache,
 ) junieSourceSet {
