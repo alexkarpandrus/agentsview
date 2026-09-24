@@ -165,12 +165,17 @@ func TestJunieSourceSetReusesIndexSnapshotWhileParsing(t *testing.T) {
 	sources, err := provider.Discover(t.Context())
 	require.NoError(t, err)
 	require.Len(t, sources, 1)
+	fingerprint, err := provider.Fingerprint(t.Context(), sources[0])
+	require.NoError(t, err)
 	require.NoError(t, os.Remove(indexPath))
 
-	outcome, err := provider.Parse(t.Context(), ParseRequest{Source: sources[0]})
+	outcome, err := provider.Parse(t.Context(), ParseRequest{Source: sources[0], Fingerprint: fingerprint})
 	require.NoError(t, err)
 	require.Len(t, outcome.Results, 1)
 	assert.Equal(t, "Cached title", outcome.Results[0].Result.Session.SessionName)
+	assert.Equal(t, fingerprint.Size, outcome.Results[0].Result.Session.File.Size)
+	assert.Equal(t, fingerprint.MTimeNS, outcome.Results[0].Result.Session.File.Mtime)
+	assert.Equal(t, fingerprint.Hash, outcome.Results[0].Result.Session.File.Hash)
 }
 
 func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {

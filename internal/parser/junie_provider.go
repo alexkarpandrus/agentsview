@@ -298,6 +298,12 @@ func (c *junieIndexCache) parseFile(
 	if req.Fingerprint.Hash != "" {
 		sess.File.Hash = req.Fingerprint.Hash
 	}
+	if req.Fingerprint.Size > 0 {
+		sess.File.Size = req.Fingerprint.Size
+	}
+	if req.Fingerprint.MTimeNS > 0 {
+		sess.File.Mtime = req.Fingerprint.MTimeNS
+	}
 	return []ParseResult{{Session: *sess, Messages: msgs}}, nil, nil
 }
 
