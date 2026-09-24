@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/money"
 )
 
 func TestParseJunieSession(t *testing.T) {
@@ -30,6 +31,7 @@ func TestParseJunieSession(t *testing.T) {
 			`{"kind":"SessionA2uxEvent","event":{"state":"IN_PROGRESS","agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"step-1","text":"thinking aloud"}},"timestampMs":1704067203000}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"IN_PROGRESS","agentEvent":{"kind":"ResultBlockUpdatedEvent","stepId":"step-1","cancelled":false,"result":"draft","changes":[]}},"timestampMs":1704067204000}` + "\n" +
 			`{"kind":"SessionA2uxEvent","event":{"state":"COMPLETED","agentEvent":{"kind":"ResultBlockUpdatedEvent","stepId":"step-1","cancelled":false,"result":"<!-- ANSWER -->Done","changes":[]}},"timestampMs":1704067205000}` + "\n" +
+			`{"kind":"SessionA2uxEvent","taskId":"task-1","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","agent":"JUNIE","modelUsage":[{"model":"claude-sonnet-4-6","cost":0.00125,"inputTokens":100,"cacheInputTokens":20,"cacheCreateTokens":30,"outputTokens":40,"time":1}]}},"timestampMs":1704067205100}` + "\n" +
 			// Summarization cost snapshots can occur during compaction; they must not terminate the message stream.
 			`{"kind":"SessionCostTrajectorySnapshotEvent","snapshot":{"attributedGroups":[{"costPurpose":"SUMMARIZATION","callPurpose":"SUMMARIZATION"}]},"timestampMs":1704067205200}` + "\n" +
 			`{"kind":"SystemMessageEvent","text":"Notice","details":"Details","level":"ERROR","symbol":"!","timestampMs":1704067205500}` + "\n" +
@@ -59,6 +61,25 @@ func TestParseJunieSession(t *testing.T) {
 	assert.Equal(t, 6, sess.MessageCount)
 	assert.Equal(t, 2, sess.UserMessageCount)
 	assert.Equal(t, 1, sess.MalformedLines)
+	assert.True(t, sess.HasTotalOutputTokens)
+	assert.Equal(t, 40, sess.TotalOutputTokens)
+	assert.True(t, sess.HasPeakContextTokens)
+	assert.Equal(t, 150, sess.PeakContextTokens)
+	require.Len(t, sess.UsageEvents, 1)
+	usage := sess.UsageEvents[0]
+	assert.Equal(t, "junie:"+sessionID, usage.SessionID)
+	assert.Equal(t, "llm-response", usage.Source)
+	assert.Equal(t, "claude-sonnet-4-6", usage.Model)
+	assert.Equal(t, 100, usage.InputTokens)
+	assert.Equal(t, 40, usage.OutputTokens)
+	assert.Equal(t, 20, usage.CacheReadInputTokens)
+	assert.Equal(t, 30, usage.CacheCreationInputTokens)
+	require.NotNil(t, usage.Cost)
+	assert.Equal(t, money.MustParseDollars("0.00125"), *usage.Cost)
+	assert.Equal(t, "exact", usage.CostStatus)
+	assert.Equal(t, "junie-model-usage", usage.CostSource)
+	assert.Equal(t, "2024-01-01T00:00:05.1Z", usage.OccurredAt)
+	assert.Equal(t, "junie:"+sessionID+":llm-response:7:0", usage.DedupKey)
 
 	require.Len(t, messages, 6)
 	assertMessage(t, messages[0], RoleUser, "Implement it")
@@ -73,6 +94,16 @@ func TestParseJunieSession(t *testing.T) {
 		assert.Equal(t, i, message.Ordinal)
 	}
 	assert.Equal(t, time.UnixMilli(1704067205000), messages[1].Timestamp)
+}
+
+func TestParseJunieSessionRejectsInvalidReportedCost(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"kind":"SessionA2uxEvent","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"test","cost":-1}]}}}`+"\n",
+	), 0o600))
+
+	_, _, err := parseJunieSessionWithSummary(t.Context(), path, "session-one", junieSessionSummary{}, false)
+	require.ErrorContains(t, err, "invalid model usage cost")
 }
 
 func TestJunieSourceSetDiscoversOnlyEventStreams(t *testing.T) {
@@ -99,6 +130,8 @@ func TestJunieSourceSetDiscoversOnlyEventStreams(t *testing.T) {
 		Machine: "local",
 	})
 	require.True(t, ok)
+	assert.Equal(t, CapabilitySupported,
+		provider.Capabilities().Content.AggregateUsageEvents)
 	sources, err := provider.Discover(t.Context())
 	require.NoError(t, err)
 	require.Len(t, sources, 2)

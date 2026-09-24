@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"go.kenn.io/agentsview/internal/money"
 )
 
 type junieSessionSummary struct {
@@ -24,8 +25,10 @@ type junieTranscriptMessage struct {
 
 type junieParserState struct {
 	entries           []junieTranscriptMessage
+	usageEvents       []ParsedUsageEvent
 	userMessages      map[string]int
 	assistantMessages map[string]int
+	sourceSessionID   string
 	startedAt         time.Time
 	endedAt           time.Time
 	sessionName       string
@@ -64,6 +67,7 @@ func parseJunieSessionWithSummary(
 	state := junieParserState{
 		userMessages:      make(map[string]int),
 		assistantMessages: make(map[string]int),
+		sourceSessionID:   filepath.Base(filepath.Dir(path)),
 	}
 	lr := newLineReaderContext(ctx, f, maxLineSize)
 	defer releaseLineReader(lr)
@@ -79,7 +83,9 @@ func parseJunieSessionWithSummary(
 			state.malformedLines++
 			continue
 		}
-		state.consumeEvent(gjson.Parse(line))
+		if err := state.consumeEvent(gjson.Parse(line), lineNumber); err != nil {
+			return nil, nil, fmt.Errorf("parsing Junie session %s line %d: %w", path, lineNumber, err)
+		}
 	}
 	if err := lr.Err(); err != nil {
 		return nil, nil, fmt.Errorf("reading Junie session %s: %w", path, err)
@@ -90,7 +96,7 @@ func parseJunieSessionWithSummary(
 	)
 }
 
-func (s *junieParserState) consumeEvent(event gjson.Result) {
+func (s *junieParserState) consumeEvent(event gjson.Result, lineNumber int) error {
 	timestamp := junieTimestamp(event.Get("timestampMs"))
 	if !timestamp.IsZero() {
 		if s.startedAt.IsZero() {
@@ -118,8 +124,9 @@ func (s *junieParserState) consumeEvent(event gjson.Result) {
 	case "AgentTaskFailedEvent":
 		s.appendMessage(RoleSystem, "Agent task failed", timestamp)
 	case "SessionA2uxEvent":
-		s.consumeA2UXEvent(event, timestamp)
+		return s.consumeA2UXEvent(event, timestamp, lineNumber)
 	}
+	return nil
 }
 
 func (s *junieParserState) consumeUserPrompt(event gjson.Result, timestamp time.Time) {
@@ -167,10 +174,14 @@ func (s *junieParserState) consumeSystemMessage(event gjson.Result, timestamp ti
 	s.appendMessage(RoleSystem, text, timestamp)
 }
 
-func (s *junieParserState) consumeA2UXEvent(event gjson.Result, timestamp time.Time) {
+func (s *junieParserState) consumeA2UXEvent(
+	event gjson.Result, timestamp time.Time, lineNumber int,
+) error {
 	agentEvent := event.Get("event.agentEvent")
 	var content string
 	switch agentEvent.Get("kind").Str {
+	case "LlmResponseMetadataEvent":
+		return s.consumeModelUsage(agentEvent, timestamp, lineNumber)
 	case "MarkdownBlockUpdatedEvent":
 		content = strings.TrimSpace(agentEvent.Get("text").Str)
 	case "ResultBlockUpdatedEvent":
@@ -178,7 +189,7 @@ func (s *junieParserState) consumeA2UXEvent(event gjson.Result, timestamp time.T
 			agentEvent.Get("result").Str, "<!-- ANSWER -->",
 		))
 	default:
-		return
+		return nil
 	}
 	stepID := agentEvent.Get("stepId").Str
 	if index, ok := s.assistantMessages[stepID]; stepID != "" && ok {
@@ -186,12 +197,56 @@ func (s *junieParserState) consumeA2UXEvent(event gjson.Result, timestamp time.T
 		s.entries[index].ContentLength = len(content)
 		s.entries[index].Timestamp = timestamp
 		s.entries[index].active = content != ""
-		return
+		return nil
 	}
 	index := s.appendMessage(RoleAssistant, content, timestamp)
 	if stepID != "" {
 		s.assistantMessages[stepID] = index
 	}
+	return nil
+}
+
+func (s *junieParserState) consumeModelUsage(
+	event gjson.Result, timestamp time.Time, lineNumber int,
+) error {
+	var parseErr error
+	event.Get("modelUsage").ForEach(func(index, usage gjson.Result) bool {
+		parsed := ParsedUsageEvent{
+			SessionID:                "junie:" + s.sourceSessionID,
+			Source:                   "llm-response",
+			Model:                    strings.TrimSpace(usage.Get("model").Str),
+			InputTokens:              max(int(usage.Get("inputTokens").Int()), 0),
+			OutputTokens:             max(int(usage.Get("outputTokens").Int()), 0),
+			CacheCreationInputTokens: max(int(usage.Get("cacheCreateTokens").Int()), 0),
+			CacheReadInputTokens:     max(int(usage.Get("cacheInputTokens").Int()), 0),
+			OccurredAt:               timeString(timestamp.UTC(), s.startedAt.UTC()),
+			DedupKey: fmt.Sprintf(
+				"junie:%s:llm-response:%d:%d", s.sourceSessionID, lineNumber, index.Int(),
+			),
+		}
+		costValue := usage.Get("cost")
+		if costValue.Exists() && costValue.Type != gjson.Null {
+			if costValue.Type != gjson.Number || costValue.Num < 0 {
+				parseErr = fmt.Errorf("invalid model usage cost")
+				return false
+			}
+			cost, err := money.ParseDollars(costValue.Raw)
+			if err != nil {
+				parseErr = fmt.Errorf("parsing model usage cost: %w", err)
+				return false
+			}
+			parsed.Cost = &cost
+			parsed.CostStatus = "exact"
+			parsed.CostSource = "junie-model-usage"
+		}
+		if parsed.InputTokens > 0 || parsed.OutputTokens > 0 ||
+			parsed.CacheCreationInputTokens > 0 || parsed.CacheReadInputTokens > 0 ||
+			parsed.Cost != nil {
+			s.usageEvents = append(s.usageEvents, parsed)
+		}
+		return true
+	})
+	return parseErr
 }
 
 func (s *junieParserState) appendMessage(
@@ -290,6 +345,8 @@ func (s *junieParserState) session(
 			Mtime: mtime,
 		},
 	}
+	applyUsageEventTokenTotals(session, s.usageEvents)
+	session.UsageEvents = s.usageEvents
 	return session, messages, nil
 }
 

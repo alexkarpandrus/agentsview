@@ -304,7 +304,7 @@ func (c *junieIndexCache) parseFile(
 	if req.Fingerprint.MTimeNS > 0 {
 		sess.File.Mtime = req.Fingerprint.MTimeNS
 	}
-	return []ParseResult{{Session: *sess, Messages: msgs}}, nil, nil
+	return []ParseResult{{Session: *sess, Messages: msgs, UsageEvents: sess.UsageEvents}}, nil, nil
 }
 
 func junieProviderCapabilities() Capabilities {
@@ -315,10 +315,11 @@ func junieProviderCapabilities() Capabilities {
 			FingerprintHashRequiredForFreshness: true,
 		},
 		Content: ContentCapabilities{
-			FirstMessage:       CapabilitySupported,
-			SessionName:        CapabilitySupported,
-			Cwd:                CapabilitySupported,
-			MalformedLineCount: CapabilitySupported,
+			FirstMessage:         CapabilitySupported,
+			SessionName:          CapabilitySupported,
+			Cwd:                  CapabilitySupported,
+			AggregateUsageEvents: CapabilitySupported,
+			MalformedLineCount:   CapabilitySupported,
 		},
 	}
 }

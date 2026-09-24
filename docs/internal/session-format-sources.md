@@ -3437,7 +3437,8 @@ schemas keep their existing ordering behavior.
   To reproduce, extract that jar with `jar xf`, read
   `agent-skills/junie-cli-docs/junie-cli-user-disk-storage.md`, and inspect
   `com.intellij.ml.llm.matterhorn.ej.app.cli.standalone.tui.app.state.SessionStore`,
-  `SessionSummary`, `SessionEvent`, and the event subclasses with `javap -p`.
+  `SessionSummary`, `SessionEvent`, `org.jetbrains.a2ux.api.LlmResponseMetadataEvent`,
+  and `org.jetbrains.a2ux.api.ModelUsage` with `javap -p`.
   The bundled storage document defines `JUNIE_HOME`; `SessionStore` bytecode
   defines `sessions/index.jsonl`, `sessions/<sessionId>/events.jsonl`, and the
   timestamp append. Producer serializers generated representative records for
@@ -3460,15 +3461,19 @@ schemas keep their existing ordering behavior.
   `SessionStore` only. It does not claim support for IDE-only conversations
   until JetBrains exposes a reproducible conversation artifact.
 
-- **Usage and cost:** The inspected session summaries and event serializers do
-  not persist normalized model, token, or cost fields, so Agentsview reports
-  messages without usage events.
+- **Usage and cost:** Nested A2UX `LlmResponseMetadataEvent.modelUsage` records
+  persist the model, producer-reported USD cost, uncached input, cache-read,
+  cache-creation, and output tokens for each model response. Agentsview emits
+  one aggregate usage row per record and uses the producer-reported cost rather
+  than catalog pricing. `SessionCostTrajectorySnapshotEvent` totals and
+  `completion.taskCostUsd` overlap those response records, so they are not
+  emitted separately.
 
 - **Agentsview:** `internal/parser/junie.go` and
   `internal/parser/junie_provider.go` discover only direct
   `sessions/<session-id>/events.jsonl` members, use content hashing for
-  freshness, normalize final user and assistant messages, and treat discovery
-  as authoritative for provider membership.
+  freshness, normalize final messages and model usage, and treat discovery as
+  authoritative for provider membership.
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go
 [evener-source-3]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/llm/types.go
