@@ -132,6 +132,8 @@ func TestJunieSourceSetDiscoversOnlyEventStreams(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, CapabilitySupported,
 		provider.Capabilities().Content.AggregateUsageEvents)
+	assert.Equal(t, CapabilitySupported,
+		provider.Capabilities().Source.ForceReplaceOnParse)
 	sources, err := provider.Discover(t.Context())
 	require.NoError(t, err)
 	require.Len(t, sources, 2)

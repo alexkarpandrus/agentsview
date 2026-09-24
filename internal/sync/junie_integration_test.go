@@ -14,8 +14,10 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	root := t.TempDir()
 	sessionDir := filepath.Join(root, "session-one")
 	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	require.NoError(t, os.WriteFile(eventsPath, []byte(
 		`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"Hello","timestampMs":1704067200500}`+"\n"+
+			`{"kind":"SessionA2uxEvent","taskId":"task-1","event":{"agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"response-1","text":"Draft response"}},"timestampMs":1704067200600}`+"\n"+
 			`{"kind":"SessionA2uxEvent","taskId":"task-1","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","agent":"JUNIE","modelUsage":[{"model":"claude-sonnet-4-6","cost":0.00125,"inputTokens":100,"cacheInputTokens":20,"cacheCreateTokens":30,"outputTokens":40,"time":1}]}},"timestampMs":1704067200750}`+"\n",
 	), 0o600))
 
@@ -48,6 +50,13 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, beforeStat.Size(), afterStat.Size())
 	require.Equal(t, beforeStat.ModTime(), afterStat.ModTime())
+	eventsFile, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = eventsFile.WriteString(
+		`{"kind":"SessionA2uxEvent","taskId":"task-1","event":{"agentEvent":{"kind":"MarkdownBlockUpdatedEvent","stepId":"response-1","text":"Final response"}},"timestampMs":1704067200900}` + "\n",
+	)
+	require.NoError(t, err)
+	require.NoError(t, eventsFile.Close())
 
 	updated := engine.SyncAll(t.Context(), nil)
 	require.Equal(t, 1, updated.Synced)
@@ -62,8 +71,9 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 
 	messages, err := database.GetMessages(t.Context(), "junie:session-one", 0, 100, true)
 	require.NoError(t, err)
-	require.Len(t, messages, 1)
+	require.Len(t, messages, 2)
 	assert.Equal(t, "Hello", messages[0].Content)
+	assert.Equal(t, "Final response", messages[1].Content)
 	usage, err := database.GetUsageEvents(t.Context(), "junie:session-one")
 	require.NoError(t, err)
 	require.Len(t, usage, 1)
@@ -79,7 +89,7 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	require.Zero(t, unchanged.Synced)
 	require.Equal(t, 1, unchanged.Skipped)
 
-	require.NoError(t, os.Remove(filepath.Join(sessionDir, "events.jsonl")))
+	require.NoError(t, os.Remove(eventsPath))
 	require.NoError(t, engine.ReconcileProviderRoots(
 		t.Context(), parser.AgentJunie, []string{root},
 	))
@@ -90,8 +100,9 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	assertSourceMissingState(t, archived)
 	messages, err = database.GetMessages(t.Context(), "junie:session-one", 0, 100, true)
 	require.NoError(t, err)
-	require.Len(t, messages, 1)
+	require.Len(t, messages, 2)
 	assert.Equal(t, "Hello", messages[0].Content)
+	assert.Equal(t, "Final response", messages[1].Content)
 	usage, err = database.GetUsageEvents(t.Context(), "junie:session-one")
 	require.NoError(t, err)
 	require.Len(t, usage, 1)

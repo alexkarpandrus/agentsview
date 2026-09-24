@@ -52,6 +52,7 @@ func newJunieSourceSetWithCache(
 				return filepath.Base(filepath.Dir(path))
 			}),
 			WithParseFile(indexCache.parseFile),
+			WithForceReplace(),
 		),
 		indexCache: indexCache,
 	}
@@ -307,8 +308,10 @@ func (c *junieIndexCache) parseFile(
 }
 
 func junieProviderCapabilities() Capabilities {
+	source := jsonlFileProviderSourceCapabilities()
+	source.ForceReplaceOnParse = CapabilitySupported
 	return Capabilities{
-		Source: jsonlFileProviderSourceCapabilities(),
+		Source: source,
 		Sync: ProviderSyncSemantics{
 			FingerprintHashInCacheKey:           true,
 			FingerprintHashRequiredForFreshness: true,
