@@ -1085,7 +1085,7 @@ default; an empty array clears it. With no overrides, Pi uses
 
 ### Alternate Agent Homes
 
-Claude Code, Codex, and Pi support alternate homes. Each home can hold a
+Claude Code, Codex, Junie, and Pi support alternate homes. Each home can hold a
 separate account or settings profile. Register the home directories themselves
 in `homes`; AgentsView derives their native session directories:
 
@@ -1096,6 +1096,9 @@ homes = ["~/.claude-work", "~/.t3code/instances/alpha/claude"]
 [agents.codex]
 homes = ["~/.codex-work", "~/.t3code/instances/alpha/codex"]
 
+[agents.junie]
+homes = ["~/.junie-work", "~/.junie-personal"]
+
 [agents.pi]
 homes = ["~/.pi-work/agent", "~/.pi-personal/agent"]
 ```
@@ -1104,6 +1107,7 @@ homes = ["~/.pi-work/agent", "~/.pi-personal/agent"]
 | ----------- | --------------------- | ----------------------------------------------- | -------------------------------------- |
 | Claude Code | `CLAUDE_CONFIG_DIR`   | `<home>/projects/`                              | none                                   |
 | Codex       | `CODEX_HOME`          | `<home>/sessions/`, `<home>/archived_sessions/` | `history.jsonl`, `session_index.jsonl` |
+| Junie       | `JUNIE_HOME`          | `<home>/sessions/*/events.jsonl`                | `sessions/index.jsonl`                |
 | Pi          | `PI_CODING_AGENT_DIR` | `<home>/sessions/`                              | none                                   |
 
 Homes are additive to defaults, environment overrides, the same table's `dirs`,

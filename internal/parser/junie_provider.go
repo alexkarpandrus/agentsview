@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +21,47 @@ type junieSourceSet struct {
 	indexCache *junieIndexCache
 }
 
+type junieIndexSummary struct {
+	ProjectDir string `json:"projectDir,omitempty"`
+	TaskName   string `json:"taskName,omitempty"`
+	CreatedAt  int64  `json:"createdAt,omitempty"`
+	UpdatedAt  int64  `json:"updatedAt,omitempty"`
+}
+
 type junieIndexCache struct {
-	mu        sync.Mutex
-	summaries map[string]map[string]string
+	mu             sync.Mutex
+	summaries      map[string]map[string]string
+	retryIDs       map[string][]string
+	rootMu         sync.Mutex
+	rootIdentities map[string]os.FileInfo
+}
+
+func (c *junieIndexCache) openRoot(path string) (*os.Root, error) {
+	path = filepath.Clean(path)
+	root, err := openJunieRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+
+	c.rootMu.Lock()
+	defer c.rootMu.Unlock()
+	if expected, present := c.rootIdentities[path]; present {
+		if !os.SameFile(expected, info) {
+			_ = root.Close()
+			return nil, fmt.Errorf("Junie root identity changed")
+		}
+		return root, nil
+	}
+	if c.rootIdentities == nil {
+		c.rootIdentities = make(map[string]os.FileInfo)
+	}
+	c.rootIdentities[path] = info
+	return root, nil
 }
 
 func newJunieProviderFactory(def AgentDef) ProviderFactory {
@@ -42,7 +81,6 @@ func newJunieSourceSetWithCache(
 	return junieSourceSet{
 		JSONLSourceSet: NewJSONLSourceSet(AgentJunie, roots,
 			WithRecursive(),
-			WithContentHashing(),
 			WithIncludePath(func(root, path string) bool {
 				return filepath.Base(path) == "events.jsonl" &&
 					IsDirectoryJSONLPath(root, path)
@@ -96,7 +134,7 @@ func (s junieSourceSet) SourcesForChangedPath(
 	// identify the changed row. Read that metadata file once, then return only
 	// the session transcripts whose summaries changed.
 	s.indexCache.mu.Lock()
-	current, present, err := loadJunieIndexSnapshot(ctx, indexPath)
+	current, present, err := loadJunieIndexSnapshot(ctx, indexPath, s.indexCache.openRoot)
 	if err != nil {
 		s.indexCache.mu.Unlock()
 		return nil, err
@@ -105,13 +143,22 @@ func (s junieSourceSet) SourcesForChangedPath(
 		current = map[string]string{}
 	}
 	previous, known := s.indexCache.summaries[indexPath]
-	s.indexCache.summaries[indexPath] = current
-	s.indexCache.mu.Unlock()
 	if !known {
 		previous = map[string]string{}
 	}
-
 	changedIDs := changedJunieSummaryIDs(previous, current)
+	// Planning has no persistence acknowledgement, so replay the last diff when
+	// the watcher retries the same index state after a failed sync.
+	if len(changedIDs) == 0 && known {
+		changedIDs = append([]string(nil), s.indexCache.retryIDs[indexPath]...)
+	} else {
+		s.indexCache.summaries[indexPath] = current
+		if s.indexCache.retryIDs == nil {
+			s.indexCache.retryIDs = make(map[string][]string)
+		}
+		s.indexCache.retryIDs[indexPath] = append([]string(nil), changedIDs...)
+	}
+	s.indexCache.mu.Unlock()
 	sources := make([]SourceRef, 0, len(changedIDs))
 	for _, sessionID := range changedIDs {
 		path := filepath.Join(root, sessionID, "events.jsonl")
@@ -144,7 +191,7 @@ func (s junieSourceSet) Fingerprint(
 	if !ok {
 		return SourceFingerprint{}, errors.New("junie source path unavailable")
 	}
-	f, err := openJunieEventStream(src.Path)
+	f, err := openJunieEventStream(src.Path, s.indexCache.openRoot)
 	if err != nil {
 		return SourceFingerprint{}, fmt.Errorf("open %s: %w", src.Path, err)
 	}
@@ -179,7 +226,6 @@ func (s junieSourceSet) Fingerprint(
 	// invalidate every transcript under the Junie root.
 	sum := sha256.Sum256([]byte(fingerprint.Hash + "\x00" + summary))
 	fingerprint.Hash = hex.EncodeToString(sum[:])
-	fingerprint.Size += int64(len(summary))
 	return fingerprint, nil
 }
 
@@ -202,7 +248,7 @@ func changedJunieSummaryIDs(previous, current map[string]string) []string {
 func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 	for _, root := range s.JSONLSourceSet.roots {
 		indexPath := filepath.Join(root, "index.jsonl")
-		snapshot, present, err := loadJunieIndexSnapshot(ctx, indexPath)
+		snapshot, present, err := loadJunieIndexSnapshot(ctx, indexPath, s.indexCache.openRoot)
 		if err != nil {
 			return err
 		}
@@ -211,6 +257,7 @@ func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 		}
 		s.indexCache.mu.Lock()
 		s.indexCache.summaries[indexPath] = snapshot
+		delete(s.indexCache.retryIDs, indexPath)
 		s.indexCache.mu.Unlock()
 	}
 	return nil
@@ -224,7 +271,7 @@ func (c *junieIndexCache) snapshot(
 	if snapshot, loaded := c.summaries[indexPath]; loaded {
 		return snapshot, nil
 	}
-	snapshot, present, err := loadJunieIndexSnapshot(ctx, indexPath)
+	snapshot, present, err := loadJunieIndexSnapshot(ctx, indexPath, c.openRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -236,9 +283,19 @@ func (c *junieIndexCache) snapshot(
 }
 
 func loadJunieIndexSnapshot(
-	ctx context.Context, path string,
+	ctx context.Context, path string, openRoot junieRootOpener,
 ) (map[string]string, bool, error) {
-	info, err := os.Lstat(path)
+	root, err := openRoot(filepath.Dir(path))
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("open Junie index root %s: %w", path, err)
+	}
+	defer root.Close()
+
+	name := filepath.Base(path)
+	info, err := root.Lstat(name)
 	if os.IsNotExist(err) {
 		return nil, false, nil
 	}
@@ -248,7 +305,7 @@ func loadJunieIndexSnapshot(
 	if !info.Mode().IsRegular() {
 		return nil, false, nil
 	}
-	f, err := openNoFollow(path)
+	f, err := root.Open(name)
 	if err != nil {
 		return nil, false, fmt.Errorf("open Junie index %s: %w", path, err)
 	}
@@ -279,13 +336,31 @@ func loadJunieIndexSnapshot(
 		}
 		sessionID := gjson.Get(line, "sessionId").Str
 		if sessionID != "" {
-			summaries[sessionID] = string(line)
+			summaries[sessionID] = normalizeJunieIndexSummary(string(line))
 		}
 	}
 	if err := lr.Err(); err != nil {
 		return nil, false, fmt.Errorf("reading Junie index %s: %w", path, err)
 	}
 	return summaries, true, nil
+}
+
+func normalizeJunieIndexSummary(line string) string {
+	summary := parseJunieSessionSummary(line)
+	var createdAt, updatedAt int64
+	if !summary.createdAt.IsZero() {
+		createdAt = summary.createdAt.UnixMilli()
+	}
+	if !summary.updatedAt.IsZero() {
+		updatedAt = summary.updatedAt.UnixMilli()
+	}
+	data, _ := json.Marshal(junieIndexSummary{
+		ProjectDir: summary.projectDir,
+		TaskName:   summary.taskName,
+		CreatedAt:  createdAt,
+		UpdatedAt:  updatedAt,
+	})
+	return string(data)
 }
 
 func (c *junieIndexCache) parseFile(
@@ -303,7 +378,7 @@ func (c *junieIndexCache) parseFile(
 		summary = parseJunieSessionSummary(line)
 	}
 	sess, msgs, err := parseJunieSessionWithSummary(
-		ctx, path, req.Machine, summary, present,
+		ctx, path, req.Machine, summary, present, c.openRoot,
 	)
 	if err != nil {
 		return nil, nil, err

@@ -1,8 +1,10 @@
 package sync
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -134,7 +136,7 @@ func TestSyncJunieMetadataFreshnessAndSourceDeletion(t *testing.T) {
 	assert.Equal(t, int64(1_250), usage[0].Cost.Microdollars)
 }
 
-func TestSyncJunieTitleOnlyRewriteClearsMessages(t *testing.T) {
+func TestSyncJuniePartialAndTitleOnlyRewrites(t *testing.T) {
 	root := t.TempDir()
 	sessionDir := filepath.Join(root, "session-title-only")
 	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
@@ -157,6 +159,19 @@ func TestSyncJunieTitleOnlyRewriteClearsMessages(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, messages, 1)
 
+	for _, rewrite := range [][]byte{
+		nil,
+		[]byte(`{"kind":"UnknownEvent","timestampMs":1704067200500}` + "\n"),
+	} {
+		require.NoError(t, os.WriteFile(eventsPath, rewrite, 0o600))
+		skipped := engine.SyncAll(t.Context(), nil)
+		require.Zero(t, skipped.Synced)
+		require.Zero(t, skipped.Failed)
+		messages, err = database.GetMessages(t.Context(), "junie:session-title-only", 0, 100, true)
+		require.NoError(t, err)
+		require.Len(t, messages, 1, "partial or unrecognized rewrites must preserve archived messages")
+	}
+
 	require.NoError(t, os.WriteFile(eventsPath, []byte(
 		`{"kind":"SessionTitleSetEvent","name":"Title only","timestampMs":1704067201000}`+"\n",
 	), 0o600))
@@ -171,4 +186,90 @@ func TestSyncJunieTitleOnlyRewriteClearsMessages(t *testing.T) {
 	require.NotNil(t, sess)
 	require.NotNil(t, sess.SessionName)
 	assert.Equal(t, "Title only", *sess.SessionName)
+}
+
+func TestJunieIndexChangedPathWorkIsArchiveBounded(t *testing.T) {
+	for _, sessionCount := range []int{2, 128} {
+		t.Run(fmt.Sprintf("sessions-%d", sessionCount), func(t *testing.T) {
+			root := t.TempDir()
+			indexPath := filepath.Join(root, "index.jsonl")
+			writeIndex := func(targetTitle string, omitTarget bool) {
+				t.Helper()
+				var index strings.Builder
+				for i := range sessionCount {
+					if omitTarget && i == 0 {
+						continue
+					}
+					sessionID := fmt.Sprintf("session-%03d", i)
+					title := "Unchanged"
+					if i == 0 {
+						title = targetTitle
+					}
+					fmt.Fprintf(&index,
+						`{"sessionId":%q,"projectDir":%q,"taskName":%q,"createdAt":1704067200000,"updatedAt":1704067201000}`+"\n",
+						sessionID, "/work/"+sessionID, title,
+					)
+				}
+				require.NoError(t, os.WriteFile(indexPath, []byte(index.String()), 0o600))
+			}
+			for i := range sessionCount {
+				sessionID := fmt.Sprintf("session-%03d", i)
+				sessionDir := filepath.Join(root, sessionID)
+				require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
+					fmt.Sprintf(`{"kind":"UserPromptEvent","requestId":%q,"prompt":%q,"timestampMs":1704067200500}`+"\n", "req-"+sessionID, sessionID),
+				), 0o600))
+			}
+			writeIndex("Before", false)
+
+			database := openTestDB(t)
+			engine := NewEngine(t.Context(), database, EngineConfig{
+				AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+				Machine:   "test",
+			})
+			t.Cleanup(engine.Close)
+			first := engine.SyncAll(t.Context(), nil)
+			require.Equal(t, sessionCount, first.Synced)
+			require.Zero(t, first.Failed)
+
+			writeIndex("After", false)
+			plan, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			require.Len(t, plan.Files, 1, "one index-row change must select one session regardless of archive size")
+			assert.Empty(t, plan.FallbackProviders)
+			result, err := engine.SyncChangedPathPlanContext(t.Context(), plan, nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, result.FilesProcessed)
+			require.Equal(t, 1, result.Stats.Synced)
+			sess, err := database.GetSessionFull(t.Context(), "junie:session-000")
+			require.NoError(t, err)
+			require.NotNil(t, sess.SessionName)
+			assert.Equal(t, "After", *sess.SessionName)
+
+			writeIndex("", true)
+			plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			require.Len(t, plan.Files, 1, "one removed index row must select one persisted session")
+			result, err = engine.SyncChangedPathPlanContext(t.Context(), plan, nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, result.FilesProcessed)
+			require.Equal(t, 1, result.Stats.Synced)
+			sess, err = database.GetSessionFull(t.Context(), "junie:session-000")
+			require.NoError(t, err)
+			assert.Equal(t, "junie", sess.Project)
+			assert.Nil(t, sess.SessionName)
+
+			require.NoError(t, os.Remove(filepath.Join(root, "session-000", "events.jsonl")))
+			require.NoError(t, engine.ReconcileProviderRoots(
+				t.Context(), parser.AgentJunie, []string{root},
+			))
+			sess, err = database.GetSessionFull(t.Context(), "junie:session-000")
+			require.NoError(t, err)
+			assertSourceMissingState(t, sess)
+			unchanged, err := database.GetSessionFull(t.Context(), "junie:session-001")
+			require.NoError(t, err)
+			require.NotNil(t, unchanged)
+			assert.Nil(t, unchanged.SourceMissingAt)
+		})
+	}
 }

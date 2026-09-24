@@ -22,15 +22,9 @@ func parseJunieProviderSession(
 	require.True(t, ok)
 	sources, err := provider.Discover(t.Context())
 	require.NoError(t, err)
-	var source SourceRef
-	found := false
-	for _, candidate := range sources {
-		if samePath(candidate.DisplayPath, path) {
-			source, found = candidate, true
-			break
-		}
-	}
-	require.True(t, found, "Junie source %s was not discovered", path)
+	require.Len(t, sources, 1)
+	require.True(t, samePath(path, sources[0].DisplayPath))
+	source := sources[0]
 	fingerprint, err := provider.Fingerprint(t.Context(), source)
 	require.NoError(t, err)
 	outcome, err := provider.Parse(t.Context(), ParseRequest{
@@ -135,7 +129,9 @@ func TestParseJunieSessionRejectsInvalidReportedCost(t *testing.T) {
 		`{"kind":"SessionA2uxEvent","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"test","cost":-1}]}}}`+"\n",
 	), 0o600))
 
-	_, _, err := parseJunieSessionWithSummary(t.Context(), path, "session-one", junieSessionSummary{}, false)
+	_, _, err := parseJunieSessionWithSummary(
+		t.Context(), path, "session-one", junieSessionSummary{}, false, openJunieRoot,
+	)
 	require.ErrorContains(t, err, "invalid model usage cost")
 }
 
@@ -278,12 +274,24 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 			require.NotNil(t, changedSource)
 			beforeFingerprint, err := provider.Fingerprint(t.Context(), *changedSource)
 			require.NoError(t, err)
+			eventInfo, err := os.Stat(changedSource.DisplayPath)
+			require.NoError(t, err)
+			assert.Equal(t, eventInfo.Size(), beforeFingerprint.Size,
+				"metadata must affect the hash without inflating the transcript size")
+			statusOnly := strings.ReplaceAll(before.String(), "}\n", `,"status":"RUNNING"}`+"\n")
+			require.NoError(t, os.WriteFile(indexPath, []byte(statusOnly), 0o600))
+			changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{
+				Path:      indexPath,
+				WatchRoot: root,
+			})
+			require.NoError(t, err)
+			assert.Empty(t, changed, "unused index fields must not invalidate a session")
 			require.NoError(t, os.WriteFile(indexPath, []byte(after.String()), 0o600))
 			provider = factory.NewProvider(cfg)
 			_, err = provider.WatchPlan(t.Context())
 			require.NoError(t, err)
 
-			changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{
+			changed, err = provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{
 				Path:      indexPath,
 				WatchRoot: root,
 			})
@@ -294,6 +302,14 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, beforeFingerprint.Size, afterFingerprint.Size)
 			assert.NotEqual(t, beforeFingerprint.Hash, afterFingerprint.Hash)
+
+			retry, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{
+				Path:      indexPath,
+				WatchRoot: root,
+			})
+			require.NoError(t, err)
+			require.Len(t, retry, 1, "repeated planning must preserve work until persistence can retry")
+			assert.Equal(t, changedID, retry[0].ProjectHint)
 		})
 	}
 }
@@ -397,4 +413,65 @@ func TestJunieSessionDirectorySwapCannotEscapeRoot(t *testing.T) {
 		Source: sources[0], Fingerprint: fingerprint, Machine: "local",
 	})
 	require.ErrorContains(t, err, "session directory is not a directory")
+}
+
+func TestJunieConfiguredRootSwapCannotEscapeRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "configured")
+	sessionDir := filepath.Join(root, "session-safe")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
+		`{"kind":"UserPromptEvent","requestId":"safe","prompt":"Safe"}`+"\n",
+	), 0o600))
+
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	sources, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+	fingerprint, err := provider.Fingerprint(t.Context(), sources[0])
+	require.NoError(t, err)
+
+	outside := filepath.Join(parent, "outside")
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "session-safe"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "session-safe", "events.jsonl"), []byte(
+		`{"kind":"UserPromptEvent","requestId":"outside","prompt":"Outside"}`+"\n",
+	), 0o600))
+	require.NoError(t, os.Rename(root, filepath.Join(parent, "moved")))
+	if err := os.Symlink(outside, root); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err = provider.Fingerprint(t.Context(), sources[0])
+	require.ErrorContains(t, err, "Junie root is not a directory")
+	_, err = provider.Parse(t.Context(), ParseRequest{
+		Source: sources[0], Fingerprint: fingerprint, Machine: "local",
+	})
+	require.ErrorContains(t, err, "Junie root is not a directory")
+
+	freshProvider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err = freshProvider.Discover(t.Context())
+	require.ErrorContains(t, err, "Junie root is not a directory")
+}
+
+func TestJunieConfiguredRootIdentityIsPinned(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "configured")
+	sessionDir := filepath.Join(root, "session-safe")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte("{}\n"), 0o600))
+
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	sources, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+
+	require.NoError(t, os.Rename(root, filepath.Join(parent, "moved")))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "session-safe"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "session-safe", "events.jsonl"), []byte("{}\n"), 0o600))
+
+	_, err = provider.Fingerprint(t.Context(), sources[0])
+	require.ErrorContains(t, err, "Junie root identity changed")
 }

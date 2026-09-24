@@ -3429,8 +3429,10 @@ schemas keep their existing ordering behavior.
 
 - **Evidence:** `no-public-source`.
 
-- **Upstream:** JetBrains Junie documentation and public repositories were
-  searched 2026-09-24; no public persistence source or authoritative event
+- **Upstream:** The first-party [Junie CLI Quickstart](https://junie.jetbrains.com/docs/junie-cli.html),
+  [slash-command reference](https://junie.jetbrains.com/docs/slash-commands.html),
+  and [JetBrains Marketplace listing](https://plugins.jetbrains.com/plugin/26104-junie-the-ai-coding-agent-by-jetbrains)
+  were searched 2026-09-24; no public persistence source or authoritative event
   schema was found. The format was reverified from the installed Junie CLI
   26.7.13 producer jar `junie-release-2285.4.jar`, SHA-256
   `51548cbe893b5e69e53ff49d5deaa1aa0ac6ebff8017b4ffc228a41681811323`.
