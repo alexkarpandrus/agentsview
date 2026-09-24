@@ -53,7 +53,7 @@ func TestParseJunieSession(t *testing.T) {
 	assert.Equal(t, "local", sess.Machine)
 	assert.Equal(t, "demo", sess.Project)
 	assert.Equal(t, "/work/demo", sess.Cwd)
-	assert.Equal(t, "Build the feature", sess.FirstMessage)
+	assert.Equal(t, "Implement it", sess.FirstMessage)
 	assert.Equal(t, "Build the feature", sess.SessionName)
 	assert.True(t, sess.SessionNamePresent)
 	assert.Equal(t, time.UnixMilli(1704067200000), sess.StartedAt)
@@ -234,10 +234,14 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 
 			indexPath := filepath.Join(root, "index.jsonl")
 			require.NoError(t, os.WriteFile(indexPath, []byte(before.String()), 0o600))
-			sources := newJunieSourceSet([]string{root})
-			_, err := sources.WatchPlan(t.Context())
+			def, ok := AgentByType(AgentJunie)
+			require.True(t, ok)
+			factory := newJunieProviderFactory(def)
+			cfg := ProviderConfig{Roots: []string{root}, Machine: "local"}
+			provider := factory.NewProvider(cfg)
+			_, err := provider.WatchPlan(t.Context())
 			require.NoError(t, err)
-			discovered, err := sources.Discover(t.Context())
+			discovered, err := provider.Discover(t.Context())
 			require.NoError(t, err)
 			var changedSource *SourceRef
 			for i := range discovered {
@@ -247,18 +251,19 @@ func TestJunieIndexChangeWorkIsBoundedByChangedSessions(t *testing.T) {
 				}
 			}
 			require.NotNil(t, changedSource)
-			beforeFingerprint, err := sources.Fingerprint(t.Context(), *changedSource)
+			beforeFingerprint, err := provider.Fingerprint(t.Context(), *changedSource)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(indexPath, []byte(after.String()), 0o600))
+			provider = factory.NewProvider(cfg)
 
-			changed, err := sources.SourcesForChangedPath(t.Context(), ChangedPathRequest{
+			changed, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{
 				Path:      indexPath,
 				WatchRoot: root,
 			})
 			require.NoError(t, err)
 			require.Len(t, changed, 1)
 			assert.Equal(t, changedID, changed[0].ProjectHint)
-			afterFingerprint, err := sources.Fingerprint(t.Context(), changed[0])
+			afterFingerprint, err := provider.Fingerprint(t.Context(), changed[0])
 			require.NoError(t, err)
 			assert.Equal(t, beforeFingerprint.Size, afterFingerprint.Size)
 			assert.NotEqual(t, beforeFingerprint.Hash, afterFingerprint.Hash)
@@ -272,7 +277,7 @@ func TestParseJunieSessionWithoutIndexUsesEventMetadata(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(
 		`{"kind":"SessionTitleSetEvent","name":"Fallback title","timestampMs":1704067200000}`+"\n"+
-			`{"kind":"UserResponseEvent","prompt":"Yes","timestampMs":1704067201000}`+"\n",
+			`{"kind":"SystemMessageEvent","text":"Ready","timestampMs":1704067201000}`+"\n",
 	), 0o600))
 
 	sess, messages, err := parseJunieSession(t.Context(), path, "local")
@@ -285,7 +290,7 @@ func TestParseJunieSessionWithoutIndexUsesEventMetadata(t *testing.T) {
 	assert.Equal(t, time.UnixMilli(1704067200000), sess.StartedAt)
 	assert.Equal(t, time.UnixMilli(1704067201000), sess.EndedAt)
 	require.Len(t, messages, 1)
-	assertMessage(t, messages[0], RoleUser, "Yes")
+	assertMessage(t, messages[0], RoleSystem, "Ready")
 }
 
 func TestParseJunieSessionIgnoresSymlinkedIndex(t *testing.T) {

@@ -24,17 +24,25 @@ type junieIndexCache struct {
 }
 
 func newJunieProviderFactory(def AgentDef) ProviderFactory {
+	indexCache := &junieIndexCache{summaries: make(map[string]map[string]string)}
 	return NewSourceSetFactory(
 		def,
 		junieProviderCapabilities(),
-		func(cfg ProviderConfig) SourceSet { return newJunieSourceSet(cfg.Roots) },
+		func(cfg ProviderConfig) SourceSet {
+			return newJunieSourceSetWithCache(cfg.Roots, indexCache)
+		},
 	)
 }
 
 func newJunieSourceSet(roots []string) junieSourceSet {
-	indexCache := &junieIndexCache{
+	return newJunieSourceSetWithCache(roots, &junieIndexCache{
 		summaries: make(map[string]map[string]string),
-	}
+	})
+}
+
+func newJunieSourceSetWithCache(
+	roots []string, indexCache *junieIndexCache,
+) junieSourceSet {
 	return junieSourceSet{
 		JSONLSourceSet: NewJSONLSourceSet(AgentJunie, roots,
 			WithRecursive(),

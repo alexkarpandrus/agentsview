@@ -309,7 +309,7 @@ func (s *junieParserState) session(
 	if !s.sessionNameFound && summaryPresent {
 		s.sessionName = summary.taskName
 	}
-	if strings.TrimSpace(s.sessionName) != "" {
+	if firstMessage == "" && strings.TrimSpace(s.sessionName) != "" {
 		firstMessage = s.sessionName
 	}
 
