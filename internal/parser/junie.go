@@ -20,6 +20,15 @@ type junieSessionSummary struct {
 	updatedAt  time.Time
 }
 
+func (s junieIndexSummary) sessionSummary() junieSessionSummary {
+	return junieSessionSummary{
+		projectDir: s.ProjectDir,
+		taskName:   s.TaskName,
+		createdAt:  junieMillisTimestamp(s.CreatedAt),
+		updatedAt:  junieMillisTimestamp(s.UpdatedAt),
+	}
+}
+
 type junieTranscriptMessage struct {
 	ParsedMessage
 	active bool
@@ -222,7 +231,7 @@ func (s *junieParserState) consumeUserPrompt(event gjson.Result, timestamp time.
 
 func (s *junieParserState) consumeAsyncResponse(event gjson.Result, timestamp time.Time) {
 	var responses []string
-	event.Get("entries").ForEach(func(_, entry gjson.Result) bool {
+	for _, entry := range event.Get("entries").Array() {
 		response := strings.TrimSpace(strings.Join([]string{
 			entry.Get("question").Str,
 			entry.Get("answer").Str,
@@ -230,8 +239,7 @@ func (s *junieParserState) consumeAsyncResponse(event gjson.Result, timestamp ti
 		if response != "" {
 			responses = append(responses, response)
 		}
-		return true
-	})
+	}
 	s.appendMessage(RoleUser, strings.Join(responses, "\n\n"), timestamp)
 }
 
@@ -279,8 +287,7 @@ func (s *junieParserState) consumeA2UXEvent(
 func (s *junieParserState) consumeModelUsage(
 	event gjson.Result, timestamp time.Time, lineNumber int,
 ) error {
-	var parseErr error
-	event.Get("modelUsage").ForEach(func(index, usage gjson.Result) bool {
+	for index, usage := range event.Get("modelUsage").Array() {
 		parsed := ParsedUsageEvent{
 			SessionID:                "junie:" + s.sourceSessionID,
 			Source:                   "llm-response",
@@ -291,19 +298,17 @@ func (s *junieParserState) consumeModelUsage(
 			CacheReadInputTokens:     max(int(usage.Get("cacheInputTokens").Int()), 0),
 			OccurredAt:               timeString(timestamp.UTC(), s.startedAt.UTC()),
 			DedupKey: fmt.Sprintf(
-				"junie:%s:llm-response:%d:%d", s.sourceSessionID, lineNumber, index.Int(),
+				"junie:%s:llm-response:%d:%d", s.sourceSessionID, lineNumber, index,
 			),
 		}
 		costValue := usage.Get("cost")
 		if costValue.Exists() && costValue.Type != gjson.Null {
 			if costValue.Type != gjson.Number || costValue.Num < 0 {
-				parseErr = errors.New("invalid model usage cost")
-				return false
+				return errors.New("invalid model usage cost")
 			}
 			cost, err := money.ParseDollars(costValue.Raw)
 			if err != nil {
-				parseErr = fmt.Errorf("parsing model usage cost: %w", err)
-				return false
+				return fmt.Errorf("parsing model usage cost: %w", err)
 			}
 			parsed.Cost = &cost
 			parsed.CostStatus = "exact"
@@ -314,9 +319,8 @@ func (s *junieParserState) consumeModelUsage(
 			parsed.Cost != nil {
 			s.usageEvents = append(s.usageEvents, parsed)
 		}
-		return true
-	})
-	return parseErr
+	}
+	return nil
 }
 
 func (s *junieParserState) appendMessage(
@@ -334,12 +338,11 @@ func (s *junieParserState) appendMessage(
 }
 
 func (s *junieParserState) setUserMessagesActive(ids gjson.Result, active bool) {
-	ids.ForEach(func(_, id gjson.Result) bool {
+	for _, id := range ids.Array() {
 		if index, ok := s.userMessages[id.Str]; ok {
 			s.entries[index].active = active
 		}
-		return true
-	})
+	}
 }
 
 func (s *junieParserState) session(
@@ -437,4 +440,11 @@ func junieTimestamp(value gjson.Result) time.Time {
 		return time.Time{}
 	}
 	return time.UnixMilli(value.Int())
+}
+
+func junieMillisTimestamp(ms int64) time.Time {
+	if ms <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
 }

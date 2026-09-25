@@ -511,6 +511,50 @@ func TestJunieDiscoveryRepinsRecreatedConfiguredRoot(t *testing.T) {
 	assert.Equal(t, "After", outcome.Results[0].Result.Session.FirstMessage)
 }
 
+func TestJunieRecreatedRootDiscardsPreviousIndexMetadata(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "configured")
+	sessionDir := filepath.Join(root, "session-safe")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionDir, "events.jsonl"),
+		[]byte(`{"kind":"UserPromptEvent","requestId":"request","prompt":"Before"}`+"\n"),
+		0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "index.jsonl"),
+		[]byte(`{"sessionId":"session-safe","taskName":"Stale title"}`+"\n"),
+		0o600,
+	))
+
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+
+	// Replace the configured root at the same path with an index-free store.
+	require.NoError(t, os.Rename(root, filepath.Join(parent, "moved")))
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionDir, "events.jsonl"),
+		[]byte(`{"kind":"UserPromptEvent","requestId":"request","prompt":"After"}`+"\n"),
+		0o600,
+	))
+
+	sources, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+	fingerprint, err := provider.Fingerprint(t.Context(), sources[0])
+	require.NoError(t, err)
+	outcome, err := provider.Parse(t.Context(), ParseRequest{
+		Source: sources[0], Fingerprint: fingerprint, Machine: "local",
+	})
+	require.NoError(t, err)
+	require.Len(t, outcome.Results, 1)
+	assert.Empty(t, outcome.Results[0].Result.Session.SessionName)
+	assert.Equal(t, "After", outcome.Results[0].Result.Session.FirstMessage)
+}
+
 func TestJunieFindSourceRefreshesIndexSummary(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session-one", "events.jsonl")
