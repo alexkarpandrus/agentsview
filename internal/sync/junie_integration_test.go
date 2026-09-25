@@ -310,3 +310,44 @@ func TestJunieIndexChangedPathWorkIsArchiveBounded(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncJunieSingleSessionWriteAcknowledgesIndexPlan(t *testing.T) {
+	root := t.TempDir()
+	sessionDir := filepath.Join(root, "session-one")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
+		`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"Hello","timestampMs":1704067200500}`+"\n",
+	), 0o600))
+	indexPath := filepath.Join(root, "index.jsonl")
+	writeIndex := func(taskName string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(indexPath, []byte(fmt.Sprintf(
+			`{"sessionId":"session-one","taskName":%q,"createdAt":1704067200000}`+"\n", taskName,
+		)), 0o600))
+	}
+	writeIndex("before")
+
+	database := openTestDB(t)
+	engine := NewEngine(t.Context(), database, EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+		Machine:   "test",
+	})
+	t.Cleanup(engine.Close)
+
+	first := engine.SyncAll(t.Context(), nil)
+	require.Equal(t, 1, first.Synced)
+
+	// A metadata rewrite plans index work for the session.
+	writeIndex("after")
+	planned, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	require.NotEmpty(t, planned.Files)
+
+	// A targeted resync writes the session, so it must also acknowledge the plan.
+	require.NoError(t, engine.SyncSingleSession("junie:session-one"))
+
+	replanned, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	assert.Empty(t, replanned.Files, "an acknowledged source must not be replanned")
+	assert.Empty(t, replanned.FallbackProviders)
+}

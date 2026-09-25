@@ -20358,6 +20358,7 @@ func (e *Engine) processAndWriteSessionFile(
 		}
 		if i == 0 {
 			write.staged = res.staged
+			write.providerSyncAck = res.providerSyncAck
 		}
 		// The session upsert commits parser-derived parent provenance before
 		// the later content, usage, and completion stages. Queue the attempted
@@ -20437,7 +20438,11 @@ func (e *Engine) processAndWriteSessionFile(
 	if sourceComplete && res.providerStatHash != nil {
 		e.recordProviderStatHash(ctx, *res.providerStatHash)
 	}
-
+	// Mirror the batch write path: acknowledge the source only after its write and
+	// link steps succeeded, so a targeted resync does not leave pending work.
+	if res.providerSyncAck != nil && resolved == len(res.results) && !preserved {
+		res.providerSyncAck()
+	}
 	return preserved, sessionsChanged, nil
 }
 
