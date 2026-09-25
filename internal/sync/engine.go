@@ -20358,7 +20358,6 @@ func (e *Engine) processAndWriteSessionFile(
 		}
 		if i == 0 {
 			write.staged = res.staged
-			write.providerSyncAck = res.providerSyncAck
 		}
 		// The session upsert commits parser-derived parent provenance before
 		// the later content, usage, and completion stages. Queue the attempted
