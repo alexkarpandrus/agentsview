@@ -660,6 +660,36 @@ func TestJunieIndexRetriesAccumulateUntilAcknowledged(t *testing.T) {
 	assert.Equal(t, "session-b", retry[0].ProjectHint)
 }
 
+func TestJunieUnavailableIndexSessionDoesNotStayPending(t *testing.T) {
+	root := t.TempDir()
+	indexPath := filepath.Join(root, "index.jsonl")
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	_, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+
+	// The index now lists a session whose transcript does not exist, so nothing
+	// can produce or acknowledge a source for it.
+	require.NoError(t, os.WriteFile(indexPath, []byte(
+		`{"sessionId":"session-gone","taskName":"Gone"}`+"\n",
+	), 0o600))
+
+	req := ChangedPathRequest{Path: indexPath, WatchRoot: root}
+	relevance, err := ResolveChangedPathRelevance(t.Context(), provider, req)
+	require.NoError(t, err)
+	require.Equal(t, ChangedPathDataBearing, relevance)
+
+	sources, err := provider.SourcesForChangedPath(t.Context(), req)
+	require.NoError(t, err)
+	require.Empty(t, sources)
+
+	// The unavailable session must not stay pending, so an unchanged index is
+	// classified as non-data instead of driving archive-wide fallback forever.
+	relevance, err = ResolveChangedPathRelevance(t.Context(), provider, req)
+	require.NoError(t, err)
+	assert.Equal(t, ChangedPathNonData, relevance)
+}
+
 func TestOpenJuniePinnedFileRejectsReplacement(t *testing.T) {
 	rootPath := t.TempDir()
 	path := filepath.Join(rootPath, "events.jsonl")

@@ -206,7 +206,9 @@ func (s junieSourceSet) SourcesForChangedPath(
 			return nil, err
 		}
 	}
-	return s.sourcesForSessionIDs(root, changedIDs), nil
+	sources, unavailableIDs := s.sourcesForSessionIDs(root, changedIDs)
+	s.indexCache.retireUnavailable(indexPath, unavailableIDs)
+	return sources, nil
 }
 
 func (s junieSourceSet) ChangedPathRelevance(
@@ -237,27 +239,35 @@ func (s junieSourceSet) indexPath(path string) (string, string, bool) {
 	return "", "", false
 }
 
-func (s junieSourceSet) sourcesForSessionIDs(root string, sessionIDs []string) []SourceRef {
+func (s junieSourceSet) sourcesForSessionIDs(
+	root string, sessionIDs []string,
+) ([]SourceRef, []string) {
 	sources := make([]SourceRef, 0, len(sessionIDs))
+	unavailableIDs := make([]string, 0)
 	for _, sessionID := range sessionIDs {
 		path := filepath.Join(root, sessionID, "events.jsonl")
 		if !IsDirectoryJSONLPath(root, path) {
+			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		dirInfo, err := os.Lstat(filepath.Dir(path))
 		if err != nil || !dirInfo.IsDir() {
+			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() {
+			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		source, ok := s.sourceRef(root, path, info)
-		if ok {
-			sources = append(sources, source)
+		if !ok {
+			unavailableIDs = append(unavailableIDs, sessionID)
+			continue
 		}
+		sources = append(sources, source)
 	}
-	return sources
+	return sources, unavailableIDs
 }
 
 func (c *junieIndexCache) classifyIndexChange(
@@ -313,6 +323,22 @@ func (c *junieIndexCache) takePlannedIDs(indexPath string) ([]string, bool) {
 	state.plannedIDs = nil
 	state.planReady = false
 	return sessionIDs, ready
+}
+
+// retireUnavailable drops pending IDs that produced no source, so a removed or
+// otherwise unavailable session cannot stay pending forever. Nothing can parse or
+// acknowledge such an ID, and a transcript that reappears still triggers its own
+// changed-path event, so keeping it pending only forces archive-wide fallback.
+func (c *junieIndexCache) retireUnavailable(indexPath string, sessionIDs []string) {
+	if len(sessionIDs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state := c.stateLocked(filepath.Dir(indexPath))
+	for _, sessionID := range sessionIDs {
+		delete(state.retryIDs, sessionID)
+	}
 }
 
 func (s junieSourceSet) Fingerprint(
