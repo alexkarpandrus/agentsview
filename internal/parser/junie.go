@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func openValidatedJunieRoot(path string) (*os.Root, os.FileInfo, error) {
 		return nil, nil, err
 	}
 	if !info.IsDir() {
-		return nil, nil, fmt.Errorf("Junie root is not a directory")
+		return nil, nil, errors.New("junie root is not a directory")
 	}
 	root, err := os.OpenRoot(path)
 	if err != nil {
@@ -58,7 +59,7 @@ func openValidatedJunieRoot(path string) (*os.Root, os.FileInfo, error) {
 	}
 	if !os.SameFile(info, openedInfo) {
 		_ = root.Close()
-		return nil, nil, fmt.Errorf("Junie root changed while opening")
+		return nil, nil, errors.New("junie root changed while opening")
 	}
 	return root, openedInfo, nil
 }
@@ -78,7 +79,7 @@ func openJunieEventStream(path string, openRoot junieRootOpener) (*os.File, erro
 		return nil, err
 	}
 	if !dirInfo.IsDir() {
-		return nil, fmt.Errorf("session directory is not a directory")
+		return nil, errors.New("session directory is not a directory")
 	}
 
 	relativePath := filepath.Join(sessionName, filepath.Base(path))
@@ -87,7 +88,7 @@ func openJunieEventStream(path string, openRoot junieRootOpener) (*os.File, erro
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("session event stream is not a regular file")
+		return nil, errors.New("session event stream is not a regular file")
 	}
 
 	f, err := openJuniePinnedFile(root, relativePath, info)
@@ -109,7 +110,7 @@ func openJuniePinnedFile(root *os.Root, name string, expected os.FileInfo) (*os.
 	}
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(expected, openedInfo) {
 		_ = f.Close()
-		return nil, fmt.Errorf("file changed while opening")
+		return nil, errors.New("file changed while opening")
 	}
 	return f, nil
 }
@@ -296,7 +297,7 @@ func (s *junieParserState) consumeModelUsage(
 		costValue := usage.Get("cost")
 		if costValue.Exists() && costValue.Type != gjson.Null {
 			if costValue.Type != gjson.Number || costValue.Num < 0 {
-				parseErr = fmt.Errorf("invalid model usage cost")
+				parseErr = errors.New("invalid model usage cost")
 				return false
 			}
 			cost, err := money.ParseDollars(costValue.Raw)
@@ -322,14 +323,12 @@ func (s *junieParserState) appendMessage(
 	role RoleType, content string, timestamp time.Time,
 ) int {
 	s.entries = append(s.entries, junieTranscriptMessage{
-		ParsedMessage: ParsedMessage{
-			Role:          role,
-			Content:       content,
-			Timestamp:     timestamp,
-			IsSystem:      role == RoleSystem,
-			ContentLength: len(content),
-		},
-		active: strings.TrimSpace(content) != "",
+		Role:          role,
+		Content:       content,
+		Timestamp:     timestamp,
+		IsSystem:      role == RoleSystem,
+		ContentLength: len(content),
+		active:        strings.TrimSpace(content) != "",
 	})
 	return len(s.entries) - 1
 }
@@ -390,9 +389,12 @@ func (s *junieParserState) session(
 	if project == "" {
 		project = "junie"
 	}
-	cwd := ""
-	if filepath.IsAbs(summary.projectDir) || looksLikeWindowsPath(summary.projectDir) {
-		cwd = filepath.Clean(summary.projectDir)
+	projectDir := strings.TrimSpace(summary.projectDir)
+	cwd := projectDir
+	if filepath.IsAbs(projectDir) {
+		cwd = filepath.Clean(projectDir)
+	} else if !strings.HasPrefix(projectDir, "/") && !looksLikeWindowsPath(projectDir) {
+		cwd = ""
 	}
 
 	session := &ParsedSession{

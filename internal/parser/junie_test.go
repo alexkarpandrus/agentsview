@@ -444,16 +444,16 @@ func TestJunieConfiguredRootSwapCannotEscapeRoot(t *testing.T) {
 	}
 
 	_, err = provider.Fingerprint(t.Context(), sources[0])
-	require.ErrorContains(t, err, "Junie root is not a directory")
+	require.ErrorContains(t, err, "junie root is not a directory")
 	_, err = provider.Parse(t.Context(), ParseRequest{
 		Source: sources[0], Fingerprint: fingerprint, Machine: "local",
 	})
-	require.ErrorContains(t, err, "Junie root is not a directory")
+	require.ErrorContains(t, err, "junie root is not a directory")
 
 	freshProvider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
 	require.True(t, ok)
 	_, err = freshProvider.Discover(t.Context())
-	require.ErrorContains(t, err, "Junie root is not a directory")
+	require.ErrorContains(t, err, "junie root is not a directory")
 }
 
 func TestJunieConfiguredRootIdentityIsPinned(t *testing.T) {
@@ -474,7 +474,7 @@ func TestJunieConfiguredRootIdentityIsPinned(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "session-safe", "events.jsonl"), []byte("{}\n"), 0o600))
 
 	_, err = provider.Fingerprint(t.Context(), sources[0])
-	require.ErrorContains(t, err, "Junie root identity changed")
+	require.ErrorContains(t, err, "junie root identity changed")
 }
 
 func TestJunieDiscoveryRepinsRecreatedConfiguredRoot(t *testing.T) {

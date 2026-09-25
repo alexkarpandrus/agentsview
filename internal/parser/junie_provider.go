@@ -71,7 +71,7 @@ func (c *junieIndexCache) openRootGeneration(path string, allowRepin bool) (*os.
 		_, previouslyOpened := c.rootIdentities[path]
 		c.rootMu.Unlock()
 		if previouslyOpened && os.IsNotExist(err) {
-			return nil, fmt.Errorf("previously opened Junie root is temporarily unavailable")
+			return nil, errors.New("previously opened Junie root is temporarily unavailable")
 		}
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (c *junieIndexCache) openRootGeneration(path string, allowRepin bool) (*os.
 	if expected, present := c.rootIdentities[path]; present && !os.SameFile(expected, info) {
 		if !allowRepin {
 			_ = root.Close()
-			return nil, fmt.Errorf("Junie root identity changed")
+			return nil, errors.New("junie root identity changed")
 		}
 	}
 	if c.rootIdentities == nil {
@@ -208,7 +208,7 @@ func (s junieSourceSet) ChangedPathRelevance(
 }
 
 func (s junieSourceSet) indexPath(path string) (string, string, bool) {
-	for _, root := range s.JSONLSourceSet.roots {
+	for _, root := range s.roots {
 		indexPath := filepath.Join(root, "index.jsonl")
 		if samePath(path, indexPath) {
 			return root, indexPath, true
@@ -232,7 +232,7 @@ func (s junieSourceSet) sourcesForSessionIDs(root string, sessionIDs []string) [
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		source, ok := s.JSONLSourceSet.sourceRef(root, path, info)
+		source, ok := s.sourceRef(root, path, info)
 		if ok {
 			sources = append(sources, source)
 		}
@@ -364,7 +364,7 @@ func changedJunieSummaryIDs(previous, current map[string]string) []string {
 }
 
 func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
-	for _, root := range s.JSONLSourceSet.roots {
+	for _, root := range s.roots {
 		indexPath := filepath.Join(root, "index.jsonl")
 		snapshot, present, err := loadJunieIndexSnapshot(
 			ctx, indexPath, s.indexCache.openRootForDiscovery,
@@ -470,7 +470,7 @@ func loadJunieIndexSnapshot(
 		return nil, false, fmt.Errorf("stat Junie index %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("Junie index %s is not a regular file", path)
+		return nil, false, fmt.Errorf("junie index %s is not a regular file", path)
 	}
 	f, err := openJuniePinnedFile(root, name, info)
 	if err != nil {
@@ -498,7 +498,11 @@ func loadJunieIndexSnapshot(
 		if sessionID == "" {
 			return nil, false, fmt.Errorf("reading Junie index %s: missing sessionId at line %d", path, lineNumber)
 		}
-		summaries[sessionID] = normalizeJunieIndexSummary(string(line))
+		normalized, err := normalizeJunieIndexSummary(line)
+		if err != nil {
+			return nil, false, fmt.Errorf("normalizing Junie index %s at line %d: %w", path, lineNumber, err)
+		}
+		summaries[sessionID] = normalized
 	}
 	if err := lr.Err(); err != nil {
 		return nil, false, fmt.Errorf("reading Junie index %s: %w", path, err)
@@ -506,7 +510,7 @@ func loadJunieIndexSnapshot(
 	return summaries, true, nil
 }
 
-func normalizeJunieIndexSummary(line string) string {
+func normalizeJunieIndexSummary(line string) (string, error) {
 	summary := parseJunieSessionSummary(line)
 	var createdAt, updatedAt int64
 	if !summary.createdAt.IsZero() {
@@ -515,13 +519,13 @@ func normalizeJunieIndexSummary(line string) string {
 	if !summary.updatedAt.IsZero() {
 		updatedAt = summary.updatedAt.UnixMilli()
 	}
-	data, _ := json.Marshal(junieIndexSummary{
+	data, err := json.Marshal(junieIndexSummary{
 		ProjectDir: summary.projectDir,
 		TaskName:   summary.taskName,
 		CreatedAt:  createdAt,
 		UpdatedAt:  updatedAt,
 	})
-	return string(data)
+	return string(data), err
 }
 
 func (c *junieIndexCache) parseFile(
