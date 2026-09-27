@@ -691,33 +691,51 @@ func TestJunieUnavailableIndexSessionDoesNotStayPending(t *testing.T) {
 }
 
 func TestJunieIndexStatErrorKeepsRetryPending(t *testing.T) {
-	root := t.TempDir()
-	sessionDir := filepath.Join(root, "session-one")
-	require.NoError(t, os.Mkdir(sessionDir, 0o755))
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	require.NoError(t, os.WriteFile(eventsPath, []byte("{}\n"), 0o600))
-	indexPath := filepath.Join(root, "index.jsonl")
-	require.NoError(t, os.WriteFile(indexPath, []byte(`{"sessionId":"session-one","taskName":"before"}`+"\n"), 0o600))
-	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
-	require.True(t, ok)
-	_, err := provider.Discover(t.Context())
-	require.NoError(t, err)
+	for _, blockRoot := range []bool{false, true} {
+		name := "event stream"
+		if blockRoot {
+			name = "session directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			sessionDir := filepath.Join(root, "session-one")
+			require.NoError(t, os.Mkdir(sessionDir, 0o755))
+			eventsPath := filepath.Join(sessionDir, "events.jsonl")
+			require.NoError(t, os.WriteFile(eventsPath, []byte("{}\n"), 0o600))
+			indexPath := filepath.Join(root, "index.jsonl")
+			require.NoError(t, os.WriteFile(indexPath, []byte(`{"sessionId":"session-one","taskName":"before"}`+"\n"), 0o600))
+			provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+			require.True(t, ok)
+			_, err := provider.Discover(t.Context())
+			require.NoError(t, err)
 
-	require.NoError(t, os.WriteFile(indexPath, []byte(`{"sessionId":"session-one","taskName":"after"}`+"\n"), 0o600))
-	require.NoError(t, os.Chmod(sessionDir, 0o000))
-	t.Cleanup(func() { require.NoError(t, os.Chmod(sessionDir, 0o755)) })
-	if _, err := os.Lstat(eventsPath); err == nil {
-		t.Skip("filesystem does not enforce directory permissions")
+			require.NoError(t, os.WriteFile(indexPath, []byte(`{"sessionId":"session-one","taskName":"after"}`+"\n"), 0o600))
+			req := ChangedPathRequest{Path: indexPath, WatchRoot: root}
+			blockedDir, checkedPath := sessionDir, eventsPath
+			if blockRoot {
+				// Stage the changed IDs while the index is still accessible.
+				relevance, err := ResolveChangedPathRelevance(t.Context(), provider, req)
+				require.NoError(t, err)
+				require.Equal(t, ChangedPathDataBearing, relevance)
+				blockedDir, checkedPath = root, sessionDir
+			}
+			require.NoError(t, os.Chmod(blockedDir, 0o000))
+			t.Cleanup(func() { require.NoError(t, os.Chmod(blockedDir, 0o755)) })
+			if _, err := os.Lstat(checkedPath); err == nil {
+				t.Skip("filesystem does not enforce directory permissions")
+			} else {
+				require.ErrorIs(t, err, os.ErrPermission)
+			}
+			_, err = provider.SourcesForChangedPath(t.Context(), req)
+			require.ErrorIs(t, err, os.ErrPermission)
+
+			require.NoError(t, os.Chmod(blockedDir, 0o755))
+			sources, err := provider.SourcesForChangedPath(t.Context(), req)
+			require.NoError(t, err)
+			require.Len(t, sources, 1, "the unchanged index must retry after access recovers")
+			assert.Equal(t, "session-one", sources[0].ProjectHint)
+		})
 	}
-	req := ChangedPathRequest{Path: indexPath, WatchRoot: root}
-	_, err = provider.SourcesForChangedPath(t.Context(), req)
-	require.ErrorIs(t, err, os.ErrPermission)
-
-	require.NoError(t, os.Chmod(sessionDir, 0o755))
-	sources, err := provider.SourcesForChangedPath(t.Context(), req)
-	require.NoError(t, err)
-	require.Len(t, sources, 1, "the unchanged index must retry after access recovers")
-	assert.Equal(t, "session-one", sources[0].ProjectHint)
 }
 
 func TestOpenJuniePinnedFileRejectsReplacement(t *testing.T) {

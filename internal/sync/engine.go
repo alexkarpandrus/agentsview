@@ -10243,9 +10243,14 @@ func (e *Engine) collectAndBatchWithOptions(
 					e.promoteSkipCacheWrites(pendingCacheWrites)
 				}
 			}
-			for i := range pending {
-				if i < len(outcome.written) && outcome.written[i] && pending[i].providerSyncAck != nil {
-					pending[i].providerSyncAck()
+			// A bulk resync writes to a replacement archive. Keep index retries
+			// until an incremental write commits to the live archive; the
+			// replacement can still be discarded before the swap.
+			if writeMode != syncWriteBulk {
+				for i := range pending {
+					if i < len(outcome.written) && outcome.written[i] && pending[i].providerSyncAck != nil {
+						pending[i].providerSyncAck()
+					}
 				}
 			}
 			stats.RecordSynced(outcome.writtenSessions)
