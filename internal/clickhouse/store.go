@@ -21,6 +21,8 @@ import (
 // Compile-time check: *Store satisfies db.Store.
 var _ db.Store = (*Store)(nil)
 
+func (s *Store) MemoryBackendName() string { return "clickhouse" }
+
 // errNotImplemented marks db.Store methods the ClickHouse reader does not
 // serve yet. The HTTP layer surfaces it as a server error; later tasks
 // replace each stub with a real query.
@@ -191,6 +193,12 @@ func (s *Store) ListRecallEntries(_ context.Context, _ db.RecallQuery) ([]db.Rec
 
 func (s *Store) GetRecallEntry(_ context.Context, _ string) (*db.RecallEntry, error) {
 	return nil, db.ErrReadOnly
+}
+
+func (s *Store) ReviewRecallEntry(
+	_ context.Context, _ string, _ db.RecallReviewAction,
+) (db.RecallEntry, error) {
+	return db.RecallEntry{}, db.ErrReadOnly
 }
 
 func (s *Store) QueryRecallEntries(_ context.Context, _ db.RecallQuery) (db.RecallPage, error) {

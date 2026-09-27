@@ -27,6 +27,8 @@ import (
 // Compile-time check: *Store satisfies db.Store.
 var _ db.Store = (*Store)(nil)
 
+func (s *Store) MemoryBackendName() string { return "duckdb" }
+
 // Store wraps a DuckDB connection for read-mostly serve mode. path and
 // handleMu support live reopening after a mirror rebuild swaps in a new
 // file (see WatchMirrorReplacement in mirror_watch.go): handleMu guards
@@ -242,6 +244,12 @@ func (s *Store) GetRecallEntry(
 	_ context.Context, _ string,
 ) (*db.RecallEntry, error) {
 	return nil, db.ErrReadOnly
+}
+
+func (s *Store) ReviewRecallEntry(
+	_ context.Context, _ string, _ db.RecallReviewAction,
+) (db.RecallEntry, error) {
+	return db.RecallEntry{}, db.ErrReadOnly
 }
 
 func (s *Store) QueryRecallEntries(
