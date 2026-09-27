@@ -315,9 +315,9 @@ func TestSyncJunieSingleSessionWriteAcknowledgesIndexPlan(t *testing.T) {
 	root := t.TempDir()
 	sessionDir := filepath.Join(root, "session-one")
 	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
-		`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"Hello","timestampMs":1704067200500}`+"\n",
-	), 0o600))
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	initialEvents := []byte(`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"Hello","timestampMs":1704067200500}` + "\n")
+	require.NoError(t, os.WriteFile(eventsPath, initialEvents, 0o600))
 	indexPath := filepath.Join(root, "index.jsonl")
 	writeIndex := func(taskName string) {
 		t.Helper()
@@ -343,8 +343,22 @@ func TestSyncJunieSingleSessionWriteAcknowledgesIndexPlan(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, planned.Files)
 
+	// A failed parse must not acknowledge the index update.
+	require.NoError(t, os.WriteFile(eventsPath, []byte(
+		`{"kind":"SessionA2uxEvent","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"cost":-1}]}},"timestampMs":1704067200600}`+"\n",
+	), 0o600))
+	require.Error(t, engine.SyncSingleSession("junie:session-one"))
+	retry, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	require.Len(t, retry.Files, 1, "failed single-session sync must keep index work pending")
+	require.NoError(t, os.WriteFile(eventsPath, initialEvents, 0o600))
+
 	// A targeted resync writes the session, so it must also acknowledge the plan.
 	require.NoError(t, engine.SyncSingleSession("junie:session-one"))
+	sess, err := database.GetSessionFull(t.Context(), "junie:session-one")
+	require.NoError(t, err)
+	require.NotNil(t, sess.SessionName)
+	assert.Equal(t, "after", *sess.SessionName)
 
 	replanned, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
 	require.NoError(t, err)

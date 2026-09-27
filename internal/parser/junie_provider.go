@@ -206,7 +206,10 @@ func (s junieSourceSet) SourcesForChangedPath(
 			return nil, err
 		}
 	}
-	sources, unavailableIDs := s.sourcesForSessionIDs(root, changedIDs)
+	sources, unavailableIDs, err := s.sourcesForSessionIDs(root, changedIDs)
+	if err != nil {
+		return nil, err
+	}
 	s.indexCache.retireUnavailable(indexPath, unavailableIDs)
 	return sources, nil
 }
@@ -241,7 +244,7 @@ func (s junieSourceSet) indexPath(path string) (string, string, bool) {
 
 func (s junieSourceSet) sourcesForSessionIDs(
 	root string, sessionIDs []string,
-) ([]SourceRef, []string) {
+) ([]SourceRef, []string, error) {
 	sources := make([]SourceRef, 0, len(sessionIDs))
 	unavailableIDs := make([]string, 0)
 	for _, sessionID := range sessionIDs {
@@ -250,13 +253,28 @@ func (s junieSourceSet) sourcesForSessionIDs(
 			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
-		dirInfo, err := os.Lstat(filepath.Dir(path))
-		if err != nil || !dirInfo.IsDir() {
+		dirPath := filepath.Dir(path)
+		dirInfo, err := os.Lstat(dirPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, nil, fmt.Errorf("stat Junie session directory %s: %w", dirPath, err)
+			}
+			unavailableIDs = append(unavailableIDs, sessionID)
+			continue
+		}
+		if !dirInfo.IsDir() {
 			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, nil, fmt.Errorf("stat Junie event stream %s: %w", path, err)
+			}
+			unavailableIDs = append(unavailableIDs, sessionID)
+			continue
+		}
+		if !info.Mode().IsRegular() {
 			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
@@ -267,7 +285,7 @@ func (s junieSourceSet) sourcesForSessionIDs(
 		}
 		sources = append(sources, source)
 	}
-	return sources, unavailableIDs
+	return sources, unavailableIDs, nil
 }
 
 func (c *junieIndexCache) classifyIndexChange(

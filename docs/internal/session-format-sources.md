@@ -3443,12 +3443,12 @@ schemas keep their existing ordering behavior.
   and `org.jetbrains.a2ux.api.ModelUsage` with `javap -p`.
   The bundled storage document defines `JUNIE_HOME`; `SessionStore` bytecode
   defines `sessions/index.jsonl`, `sessions/<sessionId>/events.jsonl`, and the
-  timestamp append. Producer serializers generated representative records for
+  timestamp append. Producer serializers generated representative
+  `UserPromptEvent`, `UserResponseEvent`, `UserAsyncResponseEvent`,
+  `SessionTitleSetEvent`, and nested `SessionA2uxEvent` records.
   `SessionStore` atomically replaces the complete index rather than appending
   changed rows, so watcher ingestion compares complete normalized snapshots;
   the filesystem event does not identify which summary row changed.
-  `UserPromptEvent`, `UserResponseEvent`, `UserAsyncResponseEvent`,
-  `SessionTitleSetEvent`, and nested `SessionA2uxEvent` values.
 
 - **Conversation mapping:** `UserPromptEvent` prefers `presentablePrompt` over
   its internal prompt. Synchronous and asynchronous user-response events become
@@ -3457,7 +3457,7 @@ schemas keep their existing ordering behavior.
   `ResultBlockUpdatedEvent` records become assistant messages; repeated block
   updates replace the prior content with the same `stepId`, so active streaming
   text remains visible without duplicating the final answer. The index supplies
-  timestamps.
+  session creation and update times; events supply message times.
 
 - **IDE boundary:** The JetBrains ACP registry and local
   `junie-chronicles.csv` files were inspected on 2026-09-24. Chronicles contain
