@@ -367,46 +367,59 @@ func TestSyncJunieSingleSessionWriteAcknowledgesIndexPlan(t *testing.T) {
 }
 
 func TestJunieDirectSyncAcknowledgesOnlyItsIndexRow(t *testing.T) {
-	root := t.TempDir()
-	for _, id := range []string{"session-one", "session-two"} {
-		path := filepath.Join(root, id, "events.jsonl")
-		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-		require.NoError(t, os.WriteFile(path, []byte(
-			`{"kind":"UserPromptEvent","requestId":"request","prompt":"Hello"}`+"\n",
-		), 0o600))
-	}
-	indexPath := filepath.Join(root, "index.jsonl")
-	writeIndex := func(one, two string) {
-		t.Helper()
-		require.NoError(t, os.WriteFile(indexPath, []byte(fmt.Sprintf(
-			`{"sessionId":"session-one","taskName":%q}`+"\n"+
-				`{"sessionId":"session-two","taskName":%q}`+"\n", one, two,
-		)), 0o600))
-	}
-	writeIndex("Before", "Before")
-	database := openTestDB(t)
-	engine := NewEngine(t.Context(), database, EngineConfig{
-		AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
-		Machine:   "test",
-	})
-	t.Cleanup(engine.Close)
-	require.Equal(t, 2, engine.SyncAll(t.Context(), nil).Synced)
+	for _, coldStart := range []bool{false, true} {
+		name := "warm"
+		if coldStart {
+			name = "cold"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, id := range []string{"session-one", "session-two"} {
+				path := filepath.Join(root, id, "events.jsonl")
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte(
+					`{"kind":"UserPromptEvent","requestId":"request","prompt":"Hello"}`+"\n",
+				), 0o600))
+			}
+			indexPath := filepath.Join(root, "index.jsonl")
+			writeIndex := func(one, two string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(indexPath, []byte(fmt.Sprintf(
+					`{"sessionId":"session-one","taskName":%q}`+"\n"+
+						`{"sessionId":"session-two","taskName":%q}`+"\n", one, two,
+				)), 0o600))
+			}
+			writeIndex("Before", "Before")
+			database := openTestDB(t)
+			config := EngineConfig{
+				AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+				Machine:   "test",
+			}
+			engine := NewEngine(t.Context(), database, config)
+			t.Cleanup(func() { engine.Close() })
+			require.Equal(t, 2, engine.SyncAll(t.Context(), nil).Synced)
+			if coldStart {
+				engine.Close()
+				engine = NewEngine(t.Context(), database, config)
+			}
 
-	writeIndex("After", "After")
-	require.NoError(t, engine.SyncSingleSession("junie:session-one"))
-	one, err := database.GetSessionFull(t.Context(), "junie:session-one")
-	require.NoError(t, err)
-	require.NotNil(t, one.SessionName)
-	assert.Equal(t, "After", *one.SessionName)
-	two, err := database.GetSessionFull(t.Context(), "junie:session-two")
-	require.NoError(t, err)
-	require.NotNil(t, two.SessionName)
-	assert.Equal(t, "Before", *two.SessionName)
+			writeIndex("After", "After")
+			require.NoError(t, engine.SyncSingleSession("junie:session-one"))
+			one, err := database.GetSessionFull(t.Context(), "junie:session-one")
+			require.NoError(t, err)
+			require.NotNil(t, one.SessionName)
+			assert.Equal(t, "After", *one.SessionName)
+			two, err := database.GetSessionFull(t.Context(), "junie:session-two")
+			require.NoError(t, err)
+			require.NotNil(t, two.SessionName)
+			assert.Equal(t, "Before", *two.SessionName)
 
-	plan, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
-	require.NoError(t, err)
-	require.Len(t, plan.Files, 1, "only the still-stale sibling should be scheduled")
-	assert.Equal(t, filepath.Join(root, "session-two", "events.jsonl"), plan.Files[0].Path)
+			plan, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			require.Len(t, plan.Files, 1, "only the still-stale sibling should be scheduled")
+			assert.Equal(t, filepath.Join(root, "session-two", "events.jsonl"), plan.Files[0].Path)
+		})
+	}
 }
 
 func TestJunieDiscardedResyncBuildKeepsIndexRetry(t *testing.T) {

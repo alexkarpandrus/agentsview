@@ -510,7 +510,13 @@ func (c *junieIndexCache) setActiveSnapshot(
 ) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.stateLocked(filepath.Dir(indexPath)).observeSnapshot(snapshot)
+	state := c.stateLocked(filepath.Dir(indexPath))
+	if state.watchSummaries == nil {
+		// Without a watcher baseline, retain every row until its source is
+		// acknowledged; otherwise direct sync could hide sibling changes.
+		state.watchSummaries = map[string]junieIndexSummary{}
+	}
+	state.observeSnapshot(snapshot)
 }
 
 func (c *junieIndexCache) rememberParseSummary(
