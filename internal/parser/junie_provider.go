@@ -453,6 +453,17 @@ func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 				snapshot = map[string]junieIndexSummary{}
 			}
 		}
+		// Discovery can run in a replacement-archive build that is later
+		// discarded. Retain new index changes until a live write acknowledges them.
+		if state.watchSummaries != nil {
+			changed := changedJunieSummaryIDs(state.watchSummaries, snapshot)
+			if len(changed) > 0 && state.retryIDs == nil {
+				state.retryIDs = make(map[string]struct{}, len(changed))
+			}
+			for _, sessionID := range changed {
+				state.retryIDs[sessionID] = struct{}{}
+			}
+		}
 		state.watchSummaries = snapshot
 		state.activeSummaries = snapshot
 		s.indexCache.mu.Unlock()

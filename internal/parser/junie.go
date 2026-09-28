@@ -57,6 +57,11 @@ func openValidatedJunieRoot(path string) (*os.Root, os.FileInfo, error) {
 	if !info.IsDir() {
 		return nil, nil, errors.New("junie root is not a directory")
 	}
+	// On Windows, os.Lstat resolves the file ID only when SameFile is called.
+	// Pin it before opening the root, so a replacement cannot change its identity.
+	if !os.SameFile(info, info) {
+		return nil, nil, errors.New("junie root changed while opening")
+	}
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return nil, nil, err
@@ -108,11 +113,6 @@ func openJunieEventStream(path string, openRoot junieRootOpener) (*os.File, erro
 }
 
 func openJuniePinnedFile(root *os.Root, name string, expected os.FileInfo) (*os.File, error) {
-	// On Windows, Lstat defers loading the file ID until SameFile is called.
-	// Resolve it before opening so a later replacement cannot change the comparison.
-	if !os.SameFile(expected, expected) {
-		return nil, errors.New("file identity unavailable")
-	}
 	f, err := root.Open(name)
 	if err != nil {
 		return nil, err

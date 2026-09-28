@@ -367,51 +367,61 @@ func TestSyncJunieSingleSessionWriteAcknowledgesIndexPlan(t *testing.T) {
 }
 
 func TestJunieDiscardedResyncBuildKeepsIndexRetry(t *testing.T) {
-	root := t.TempDir()
-	sessionDir := filepath.Join(root, "session-one")
-	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
-		`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"Hello","timestampMs":1704067200500}`+"\n",
-	), 0o600))
-	indexPath := filepath.Join(root, "index.jsonl")
-	writeIndex := func(name string) {
-		t.Helper()
-		require.NoError(t, os.WriteFile(indexPath, []byte(fmt.Sprintf(
-			`{"sessionId":"session-one","taskName":%q,"createdAt":1704067200000}`+"\n", name,
-		)), 0o600))
+	for _, preplanned := range []bool{false, true} {
+		name := "without_preplan"
+		if preplanned {
+			name = "preplanned"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			sessionDir := filepath.Join(root, "session-one")
+			require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(
+				`{"kind":"UserPromptEvent","requestId":"req-1","prompt":"Hello","timestampMs":1704067200500}`+"\n",
+			), 0o600))
+			indexPath := filepath.Join(root, "index.jsonl")
+			writeIndex := func(name string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(indexPath, []byte(fmt.Sprintf(
+					`{"sessionId":"session-one","taskName":%q,"createdAt":1704067200000}`+"\n", name,
+				)), 0o600))
+			}
+			writeIndex("before")
+
+			database := openTestDB(t)
+			engine := NewEngine(t.Context(), database, EngineConfig{
+				AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+				Machine:   "test",
+			})
+			t.Cleanup(engine.Close)
+			require.Equal(t, 1, engine.SyncAll(t.Context(), nil).Synced)
+			writeIndex("after")
+			if preplanned {
+				planned, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+				require.NoError(t, err)
+				require.Len(t, planned.Files, 1)
+			}
+
+			// Build writes the replacement, but abandoning it leaves the live archive unchanged.
+			_, stats, err := engine.ResyncBuild(t.Context(), nil)
+			require.NoError(t, err)
+			require.False(t, stats.Aborted)
+			sess, err := database.GetSessionFull(t.Context(), "junie:session-one")
+			require.NoError(t, err)
+			require.NotNil(t, sess.SessionName)
+			assert.Equal(t, "before", *sess.SessionName)
+			retry, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			require.Len(t, retry.Files, 1, "discarded replacement must not consume the index retry")
+
+			require.NoError(t, engine.SyncSingleSession("junie:session-one"))
+			sess, err = database.GetSessionFull(t.Context(), "junie:session-one")
+			require.NoError(t, err)
+			require.NotNil(t, sess.SessionName)
+			assert.Equal(t, "after", *sess.SessionName)
+			retry, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+			require.NoError(t, err)
+			assert.Empty(t, retry.Files)
+		})
 	}
-	writeIndex("before")
-
-	database := openTestDB(t)
-	engine := NewEngine(t.Context(), database, EngineConfig{
-		AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
-		Machine:   "test",
-	})
-	t.Cleanup(engine.Close)
-	require.Equal(t, 1, engine.SyncAll(t.Context(), nil).Synced)
-	writeIndex("after")
-	planned, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
-	require.NoError(t, err)
-	require.Len(t, planned.Files, 1)
-
-	// Build writes the replacement, but abandoning it leaves the live archive unchanged.
-	_, stats, err := engine.ResyncBuild(t.Context(), nil)
-	require.NoError(t, err)
-	require.False(t, stats.Aborted)
-	sess, err := database.GetSessionFull(t.Context(), "junie:session-one")
-	require.NoError(t, err)
-	require.NotNil(t, sess.SessionName)
-	assert.Equal(t, "before", *sess.SessionName)
-	retry, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
-	require.NoError(t, err)
-	require.Len(t, retry.Files, 1, "discarded replacement must not consume the index retry")
-
-	require.NoError(t, engine.SyncSingleSession("junie:session-one"))
-	sess, err = database.GetSessionFull(t.Context(), "junie:session-one")
-	require.NoError(t, err)
-	require.NotNil(t, sess.SessionName)
-	assert.Equal(t, "after", *sess.SessionName)
-	retry, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
-	require.NoError(t, err)
-	assert.Empty(t, retry.Files)
 }
