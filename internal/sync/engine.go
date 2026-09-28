@@ -2452,16 +2452,6 @@ func providerDiscoveredPath(source parser.SourceRef) string {
 	return ""
 }
 
-func providerSourceSyncAck(provider parser.Provider, source parser.SourceRef) func() {
-	acknowledger, ok := provider.(parser.SourceSyncAcknowledger)
-	if !ok {
-		return nil
-	}
-	return func() {
-		acknowledger.AcknowledgeSourceSync(source)
-	}
-}
-
 func providerVirtualSourceContainerExists(path string) bool {
 	container := validatedProviderSourceStatPath(path)
 	return container != path && parser.IsRegularFile(container)
@@ -10222,16 +10212,6 @@ func (e *Engine) collectAndBatchWithOptions(
 					e.promoteSkipCacheWrites(pendingCacheWrites)
 				}
 			}
-			// A bulk resync writes to a replacement archive. Keep index retries
-			// until an incremental write commits to the live archive; the
-			// replacement can still be discarded before the swap.
-			if writeMode != syncWriteBulk {
-				for i := range pending {
-					if i < len(outcome.written) && outcome.written[i] && pending[i].providerSyncAck != nil {
-						pending[i].providerSyncAck()
-					}
-				}
-			}
 			stats.RecordSynced(outcome.writtenSessions)
 			for range outcome.failedSessions {
 				stats.RecordFailed()
@@ -10387,9 +10367,6 @@ func (e *Engine) collectAndBatchWithOptions(
 					baselineProcessedSource(r, admitted)
 					for _, ownership := range exactOwnerships {
 						baselineExactOwnership(ownership)
-					}
-					if writeMode != syncWriteBulk && r.providerSyncAck != nil {
-						r.providerSyncAck()
 					}
 				}
 			}
@@ -10674,7 +10651,6 @@ func (e *Engine) collectAndBatchWithOptions(
 				}
 				if i == 0 {
 					pw.staged = r.staged
-					pw.providerSyncAck = r.providerSyncAck
 				}
 				pending = append(pending, pw)
 				pendingBytes += pw.sourceBytes
@@ -11172,7 +11148,6 @@ type processResult struct {
 	// retrySessionIDs carries provider per-result data-version state.
 	// Legacy parsers use needsRetry as a source-wide fallback.
 	retrySessionIDs map[string]bool
-	providerSyncAck func()
 	deferredCount   int
 	// suppressPresenceSweep marks a source result that must not authorize
 	// presence or tombstone reconciliation, including clean unsupported skips.
@@ -11769,9 +11744,8 @@ func (e *Engine) processProviderFile(
 			verifiedCapture.signature.size, verifiedMtime,
 		) {
 			return processResult{
-				skip:            true,
-				mtime:           verifiedMtime,
-				providerSyncAck: providerSourceSyncAck(provider, source),
+				skip:  true,
+				mtime: verifiedMtime,
 			}, true
 		}
 		e.invalidateVerifiedSource(
@@ -11836,9 +11810,8 @@ func (e *Engine) processProviderFile(
 				e.promoteVerifiedSource(verifiedCapture)
 			}
 			return processResult{
-				skip:            true,
-				mtime:           freshMTime,
-				providerSyncAck: providerSourceSyncAck(provider, source),
+				skip:  true,
+				mtime: freshMTime,
 			}, true
 		}
 	}
@@ -11896,9 +11869,8 @@ func (e *Engine) processProviderFile(
 					)
 				}
 				return processResult{
-					skip:            true,
-					mtime:           mtime,
-					providerSyncAck: providerSourceSyncAck(provider, source),
+					skip:  true,
+					mtime: mtime,
 				}, true
 			}
 			// A gate-eligible local source without a comparable stored hash
@@ -12111,12 +12083,11 @@ func (e *Engine) processProviderFile(
 						)
 					}
 					return processResult{
-						skip:            true,
-						mtime:           fingerprint.MTimeNS,
-						cacheSkip:       true,
-						cachedSkip:      true,
-						cacheKey:        cacheKey,
-						providerSyncAck: providerSourceSyncAck(provider, source),
+						skip:       true,
+						mtime:      fingerprint.MTimeNS,
+						cacheSkip:  true,
+						cachedSkip: true,
+						cacheKey:   cacheKey,
 					}, true
 				}
 				// A commit raced cache validation and tracker restoration.
@@ -12128,11 +12099,10 @@ func (e *Engine) processProviderFile(
 		file, source, fingerprint, providerSemantics,
 	) {
 		return processResult{
-			skip:            true,
-			mtime:           fingerprint.MTimeNS,
-			cacheSkip:       true,
-			cacheKey:        cacheKey,
-			providerSyncAck: providerSourceSyncAck(provider, source),
+			skip:      true,
+			mtime:     fingerprint.MTimeNS,
+			cacheSkip: true,
+			cacheKey:  cacheKey,
 		}, true
 	}
 
@@ -12204,12 +12174,11 @@ func (e *Engine) processProviderFile(
 				)
 			}
 			return processResult{
-				skip:            true,
-				mtime:           fingerprint.MTimeNS,
-				cacheSkip:       cacheSkip,
-				cacheKey:        cacheKey,
-				noCacheSkip:     true,
-				providerSyncAck: providerSourceSyncAck(provider, source),
+				skip:        true,
+				mtime:       fingerprint.MTimeNS,
+				cacheSkip:   cacheSkip,
+				cacheKey:    cacheKey,
+				noCacheSkip: true,
 			}, true
 		}
 	}
@@ -12229,11 +12198,10 @@ func (e *Engine) processProviderFile(
 			ctx, source, fingerprint, providerSemantics, preParseStatHash,
 		) {
 		return processResult{
-			skip:            true,
-			mtime:           fingerprint.MTimeNS,
-			cacheSkip:       cacheSkip,
-			cacheKey:        cacheKey,
-			providerSyncAck: providerSourceSyncAck(provider, source),
+			skip:      true,
+			mtime:     fingerprint.MTimeNS,
+			cacheSkip: cacheSkip,
+			cacheKey:  cacheKey,
 		}, true
 	}
 
@@ -12598,9 +12566,6 @@ func (e *Engine) processProviderFile(
 		sourceCwdResolution:      cwdDecision.resolution,
 		sourceCwdStored:          cwdDecision.storedCwd,
 		sourceCwdStoredOK:        cwdDecision.storedOK,
-	}
-	if len(filteredResults) == 1 {
-		res.providerSyncAck = providerSourceSyncAck(provider, source)
 	}
 	if (file.Agent == parser.AgentOmnigent ||
 		file.Agent == parser.AgentCursorIDE) && cacheSkip && cleanCache &&
@@ -16855,7 +16820,6 @@ type pendingWrite struct {
 	sourceCwdResolution parser.SourceCwdResolution
 	sourceCwdStored     string
 	sourceCwdStoredOK   bool
-	providerSyncAck     func()
 }
 
 type sessionWriteIdentityReader interface {
@@ -20209,9 +20173,6 @@ func (e *Engine) processAndWriteSessionFile(
 				"link fresh subagent sessions: %w", err,
 			)
 		}
-		if res.providerSyncAck != nil {
-			res.providerSyncAck()
-		}
 		return false, sessionsChanged, nil
 	}
 	if res.cacheSkip {
@@ -20486,11 +20447,7 @@ func (e *Engine) processAndWriteSessionFile(
 	if sourceComplete && res.providerStatHash != nil {
 		e.recordProviderStatHash(ctx, *res.providerStatHash)
 	}
-	// Mirror the batch write path: acknowledge the source only after its write and
-	// link steps succeeded, so a targeted resync does not leave pending work.
-	if res.providerSyncAck != nil && resolved == len(res.results) && !preserved {
-		res.providerSyncAck()
-	}
+
 	return preserved, sessionsChanged, nil
 }
 

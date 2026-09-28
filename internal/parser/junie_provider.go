@@ -35,23 +35,9 @@ type junieCachedSummary struct {
 	present bool
 }
 
-type junieProviderFactory struct {
-	ProviderFactory
-	indexCache *junieIndexCache
-}
-
-type junieProvider struct {
-	*SourceSetProvider
-	indexCache *junieIndexCache
-}
-
 type junieRootState struct {
-	identity        os.FileInfo
 	watchSummaries  map[string]junieIndexSummary
 	activeSummaries map[string]junieIndexSummary
-	retryIDs        map[string]struct{}
-	plannedIDs      []string
-	planReady       bool
 	parseSummaries  map[string]junieCachedSummary
 }
 
@@ -73,85 +59,15 @@ func (c *junieIndexCache) stateLocked(root string) *junieRootState {
 	return state
 }
 
-// observeSnapshot retains changes found outside watcher classification until a
-// live source write or confirmed-fresh skip acknowledges each affected session.
-func (state *junieRootState) observeSnapshot(snapshot map[string]junieIndexSummary) {
-	if state.watchSummaries != nil {
-		changed := changedJunieSummaryIDs(state.watchSummaries, snapshot)
-		if len(changed) > 0 && state.retryIDs == nil {
-			state.retryIDs = make(map[string]struct{}, len(changed))
-		}
-		for _, sessionID := range changed {
-			state.retryIDs[sessionID] = struct{}{}
-		}
-	}
-	state.watchSummaries = snapshot
-	state.activeSummaries = snapshot
-}
-
-func (c *junieIndexCache) openRoot(path string) (*os.Root, error) {
-	return c.openRootGeneration(path, false)
-}
-
-func (c *junieIndexCache) openRootForDiscovery(path string) (*os.Root, error) {
-	return c.openRootGeneration(path, true)
-}
-
-func (c *junieIndexCache) openRootGeneration(path string, allowRepin bool) (*os.Root, error) {
-	path = filepath.Clean(path)
-	root, info, err := openValidatedJunieRoot(path, os.OpenRoot)
-	if err != nil {
-		c.mu.Lock()
-		state := c.roots[path]
-		c.mu.Unlock()
-		if state != nil && state.identity != nil && os.IsNotExist(err) {
-			return nil, errors.New("previously opened Junie root is temporarily unavailable")
-		}
-		return nil, err
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	state := c.roots[path]
-	if state != nil && state.identity != nil && !os.SameFile(state.identity, info) {
-		if !allowRepin {
-			_ = root.Close()
-			return nil, errors.New("junie root identity changed")
-		}
-		state = nil
-	}
-	if state == nil {
-		if c.roots == nil {
-			c.roots = make(map[string]*junieRootState)
-		}
-		state = &junieRootState{}
-		c.roots[path] = state
-	}
-	state.identity = info
-	return root, nil
-}
-
 func newJunieProviderFactory(def AgentDef) ProviderFactory {
 	indexCache := new(junieIndexCache)
-	base := NewSourceSetFactory(
+	return NewSourceSetFactory(
 		def,
 		junieProviderCapabilities(),
 		func(cfg ProviderConfig) SourceSet {
 			return newJunieSourceSetWithCache(cfg.Roots, indexCache)
 		},
 	)
-	return &junieProviderFactory{ProviderFactory: base, indexCache: indexCache}
-}
-
-func (f *junieProviderFactory) NewProvider(cfg ProviderConfig) Provider {
-	return &junieProvider{
-		SourceSetProvider: f.ProviderFactory.NewProvider(cfg).(*SourceSetProvider),
-		indexCache:        f.indexCache,
-	}
-}
-
-func (p *junieProvider) AcknowledgeSourceSync(source SourceRef) {
-	p.indexCache.acknowledge(source)
 }
 
 func newJunieSourceSetWithCache(
@@ -197,7 +113,7 @@ func (s junieSourceSet) FindSource(
 		return SourceRef{}, false, errors.New("junie source path unavailable")
 	}
 	indexPath := filepath.Join(filepath.Dir(filepath.Dir(src.Path)), "index.jsonl")
-	snapshot, present, err := loadJunieIndexSnapshot(ctx, indexPath, s.indexCache.openRoot)
+	snapshot, present, err := loadJunieIndexSnapshot(ctx, indexPath, openJunieRoot)
 	if err != nil {
 		return SourceRef{}, false, err
 	}
@@ -215,19 +131,23 @@ func (s junieSourceSet) SourcesForChangedPath(
 	if !ok {
 		return s.JSONLSourceSet.SourcesForChangedPath(ctx, req)
 	}
-	changedIDs, planned := s.indexCache.takePlannedIDs(indexPath)
-	if !planned {
-		var err error
-		changedIDs, err = s.indexCache.classifyIndexChange(ctx, indexPath)
-		if err != nil {
-			return nil, err
-		}
-	}
-	sources, unavailableIDs, err := s.sourcesForSessionIDs(root, changedIDs)
+	changedIDs, snapshot, err := s.indexCache.indexChange(ctx, indexPath)
 	if err != nil {
 		return nil, err
 	}
-	s.indexCache.retireUnavailable(indexPath, unavailableIDs)
+	sources, err := s.sourcesForSessionIDs(root, changedIDs)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot != nil {
+		s.indexCache.mu.Lock()
+		state := s.indexCache.stateLocked(root)
+		state.watchSummaries = snapshot
+		state.activeSummaries = snapshot
+		s.indexCache.mu.Unlock()
+	}
+	// ponytail: failed metadata-only syncs wait for the next full sync or
+	// transcript write; compare against the archive if faster retries are needed.
 	return sources, nil
 }
 
@@ -238,11 +158,10 @@ func (s junieSourceSet) ChangedPathRelevance(
 	if !ok {
 		return ChangedPathUnclassified, nil
 	}
-	changedIDs, err := s.indexCache.classifyIndexChange(ctx, indexPath)
+	changedIDs, _, err := s.indexCache.indexChange(ctx, indexPath)
 	if err != nil {
 		return ChangedPathUnclassified, err
 	}
-	s.indexCache.stagePlannedIDs(indexPath, changedIDs)
 	if len(changedIDs) == 0 {
 		return ChangedPathNonData, nil
 	}
@@ -261,119 +180,59 @@ func (s junieSourceSet) indexPath(path string) (string, string, bool) {
 
 func (s junieSourceSet) sourcesForSessionIDs(
 	root string, sessionIDs []string,
-) ([]SourceRef, []string, error) {
+) ([]SourceRef, error) {
 	sources := make([]SourceRef, 0, len(sessionIDs))
-	unavailableIDs := make([]string, 0)
 	for _, sessionID := range sessionIDs {
 		path := filepath.Join(root, sessionID, "events.jsonl")
 		if !IsDirectoryJSONLPath(root, path) {
-			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		dirPath := filepath.Dir(path)
 		dirInfo, err := os.Lstat(dirPath)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				return nil, nil, fmt.Errorf("stat Junie session directory %s: %w", dirPath, err)
+				return nil, fmt.Errorf("stat Junie session directory %s: %w", dirPath, err)
 			}
-			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		if !dirInfo.IsDir() {
-			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		info, err := os.Lstat(path)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				return nil, nil, fmt.Errorf("stat Junie event stream %s: %w", path, err)
+				return nil, fmt.Errorf("stat Junie event stream %s: %w", path, err)
 			}
-			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		if !info.Mode().IsRegular() {
-			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		source, ok := s.sourceRef(root, path, info)
 		if !ok {
-			unavailableIDs = append(unavailableIDs, sessionID)
 			continue
 		}
 		sources = append(sources, source)
 	}
-	return sources, unavailableIDs, nil
+	return sources, nil
 }
 
-func (c *junieIndexCache) classifyIndexChange(
+// indexChange compares the current index without consuming the watcher baseline.
+func (c *junieIndexCache) indexChange(
 	ctx context.Context, indexPath string,
-) ([]string, error) {
-	current, present, err := loadJunieIndexSnapshot(ctx, indexPath, c.openRoot)
-	if err != nil {
-		return nil, err
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	state := c.stateLocked(filepath.Dir(indexPath))
-	previous := state.watchSummaries
-	if previous == nil {
-		previous = map[string]junieIndexSummary{}
-	}
-	if !present {
-		// The producer atomically replaces the complete index. A missing file is
-		// not a valid replacement snapshot, so retain the last complete view.
-		current = previous
-	}
-	changedIDs := changedJunieSummaryIDs(previous, current)
-	state.watchSummaries = current
-	state.activeSummaries = current
-	if state.retryIDs == nil {
-		state.retryIDs = make(map[string]struct{})
-	}
-	for _, sessionID := range changedIDs {
-		state.retryIDs[sessionID] = struct{}{}
-	}
-	all := make([]string, 0, len(state.retryIDs))
-	for sessionID := range state.retryIDs {
-		all = append(all, sessionID)
-	}
-	sort.Strings(all)
-	return all, nil
-}
-
-func (c *junieIndexCache) stagePlannedIDs(indexPath string, sessionIDs []string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	state := c.stateLocked(filepath.Dir(indexPath))
-	state.plannedIDs = append([]string(nil), sessionIDs...)
-	state.planReady = true
-}
-
-func (c *junieIndexCache) takePlannedIDs(indexPath string) ([]string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	state := c.stateLocked(filepath.Dir(indexPath))
-	sessionIDs, ready := state.plannedIDs, state.planReady
-	state.plannedIDs = nil
-	state.planReady = false
-	return sessionIDs, ready
-}
-
-// retireUnavailable drops pending IDs that produced no source, so a removed or
-// otherwise unavailable session cannot stay pending forever. Nothing can parse or
-// acknowledge such an ID, and a transcript that reappears still triggers its own
-// changed-path event, so keeping it pending only forces archive-wide fallback.
-func (c *junieIndexCache) retireUnavailable(indexPath string, sessionIDs []string) {
-	if len(sessionIDs) == 0 {
-		return
+) ([]string, map[string]junieIndexSummary, error) {
+	current, present, err := loadJunieIndexSnapshot(ctx, indexPath, openJunieRoot)
+	if err != nil || !present {
+		// A missing index is not a replacement snapshot during watcher updates.
+		return nil, nil, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	state := c.stateLocked(filepath.Dir(indexPath))
-	for _, sessionID := range sessionIDs {
-		delete(state.retryIDs, sessionID)
+	var previous map[string]junieIndexSummary
+	if state := c.roots[filepath.Dir(indexPath)]; state != nil {
+		previous = state.watchSummaries
 	}
+	return changedJunieSummaryIDs(previous, current), current, nil
 }
 
 func (s junieSourceSet) Fingerprint(
@@ -386,7 +245,7 @@ func (s junieSourceSet) Fingerprint(
 	if !ok {
 		return SourceFingerprint{}, errors.New("junie source path unavailable")
 	}
-	f, err := openJunieEventStream(src.Path, s.indexCache.openRoot)
+	f, err := openJunieEventStream(src.Path, openJunieRoot)
 	if err != nil {
 		return SourceFingerprint{}, fmt.Errorf("open %s: %w", src.Path, err)
 	}
@@ -455,7 +314,7 @@ func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 	for _, root := range s.roots {
 		indexPath := filepath.Join(root, "index.jsonl")
 		snapshot, present, err := loadJunieIndexSnapshot(
-			ctx, indexPath, s.indexCache.openRootForDiscovery,
+			ctx, indexPath, openJunieRoot,
 		)
 		if err != nil {
 			return err
@@ -463,13 +322,10 @@ func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 		s.indexCache.mu.Lock()
 		state := s.indexCache.stateLocked(root)
 		if !present {
-			if state.watchSummaries != nil {
-				snapshot = state.watchSummaries
-			} else {
-				snapshot = map[string]junieIndexSummary{}
-			}
+			snapshot = map[string]junieIndexSummary{}
 		}
-		state.observeSnapshot(snapshot)
+		state.watchSummaries = snapshot
+		state.activeSummaries = snapshot
 		s.indexCache.mu.Unlock()
 	}
 	return nil
@@ -485,7 +341,7 @@ func (c *junieIndexCache) activeSummary(
 	c.mu.Unlock()
 
 	if snapshot == nil {
-		loaded, present, err := loadJunieIndexSnapshot(ctx, indexPath, c.openRoot)
+		loaded, present, err := loadJunieIndexSnapshot(ctx, indexPath, openJunieRoot)
 		if err != nil {
 			return junieIndexSummary{}, false, err
 		}
@@ -511,12 +367,7 @@ func (c *junieIndexCache) setActiveSnapshot(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	state := c.stateLocked(filepath.Dir(indexPath))
-	if state.watchSummaries == nil {
-		// Without a watcher baseline, retain every row until its source is
-		// acknowledged; otherwise direct sync could hide sibling changes.
-		state.watchSummaries = map[string]junieIndexSummary{}
-	}
-	state.observeSnapshot(snapshot)
+	state.activeSummaries = snapshot
 }
 
 func (c *junieIndexCache) rememberParseSummary(
@@ -545,18 +396,6 @@ func (c *junieIndexCache) parseSummary(
 	}
 	indexPath := filepath.Join(root, "index.jsonl")
 	return c.activeSummary(ctx, indexPath, filepath.Base(filepath.Dir(path)))
-}
-
-func (c *junieIndexCache) acknowledge(source SourceRef) {
-	src, ok := source.Opaque.(JSONLSource)
-	if !ok {
-		return
-	}
-	root := filepath.Dir(filepath.Dir(src.Path))
-	sessionID := filepath.Base(filepath.Dir(src.Path))
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.stateLocked(root).retryIDs, sessionID)
 }
 
 func loadJunieIndexSnapshot(
@@ -644,13 +483,13 @@ func (c *junieIndexCache) parseFile(
 	if present {
 		summary = indexSummary.sessionSummary()
 	}
-	sess, msgs, complete, err := parseJunieSessionWithSummary(
-		ctx, path, req.Machine, summary, present, c.openRoot,
+	sess, msgs, err := parseJunieSessionWithSummary(
+		ctx, path, req.Machine, summary, present, openJunieRoot,
 	)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !complete || sess == nil {
+	if sess == nil {
 		return nil, nil, nil
 	}
 	if req.Fingerprint.Hash != "" {

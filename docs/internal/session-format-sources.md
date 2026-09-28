@@ -1738,16 +1738,16 @@ schemas keep their existing ordering behavior.
 - **Session bounds:**
   [Issue #2003](https://github.com/kenn-io/agentsview/issues/2003):
   `composerData.createdAt` is not a reliable conversation start. Read-only
-  inspection of one live Windows `state.vscdb` on 2026-09-27
-  found 735 composers with both a nonzero `createdAt` and at least one
-  timestamped bubble. In 93 of them `createdAt` was more than an hour from the
-  earliest bubble, in 30 more than a day, and in 7 more than a week, up to about
-  235 days. It preceded the earliest bubble in 25 of the day-plus cases and
+  inspection of one live Windows `state.vscdb` on 2026-09-27 found 735
+  composers with both a nonzero `createdAt` and at least one timestamped
+  bubble. In 93 of them `createdAt` was more than an hour from the earliest
+  bubble, in 30 more than a day, and in 7 more than a week, up to about 235
+  days. It preceded the earliest bubble in 25 of the day-plus cases and
   followed it in 5; 6 composers had `createdAt` after their last bubble.
   Header order also differed from chronological order in 38 composers.
-  Agentsview therefore starts a session at its earliest timestamped message and
-  uses `createdAt` only when no bubble carries a timestamp. The session ends at
-  the later of `lastUpdatedAt` and the latest message timestamp.
+  Agentsview therefore starts a session at its earliest timestamped message
+  and uses `createdAt` only when no bubble carries a timestamp. The session
+  ends at the later of `lastUpdatedAt` and the latest message timestamp.
 - **Usage and cost:** No per-message or per-session token, cache, reasoning,
   credit, or monetary-cost fields were observed in `composerData` or bubble
   documents. Agentsview emits no usage events for this agent; cost is
@@ -3442,56 +3442,80 @@ schemas keep their existing ordering behavior.
 
 - **Evidence:** `no-public-source`.
 
-- **Upstream:** The first-party [Junie CLI Quickstart](https://junie.jetbrains.com/docs/junie-cli.html),
+- **Upstream:** The first-party
+  [Junie CLI Quickstart](https://junie.jetbrains.com/docs/junie-cli.html),
   [slash-command reference](https://junie.jetbrains.com/docs/slash-commands.html),
-  and [JetBrains Marketplace listing](https://plugins.jetbrains.com/plugin/26104-junie-the-ai-coding-agent-by-jetbrains)
-  were searched 2026-09-24; no public persistence source or authoritative event
-  schema was found. The format was reverified from the installed Junie CLI
-  26.7.13 producer jar `junie-release-2285.4.jar`, SHA-256
-  `51548cbe893b5e69e53ff49d5deaa1aa0ac6ebff8017b4ffc228a41681811323`.
-  To reproduce, extract that jar with `jar xf`, read
+  and
+  [JetBrains Marketplace listing](https://plugins.jetbrains.com/plugin/26104-junie-the-ai-coding-agent-by-jetbrains)
+  were searched 2026-09-24; no public persistence source or authoritative
+  event schema was found. The format was reverified from the installed Junie
+  CLI 26.7.13 producer jar `junie-release-2285.4.jar`, SHA-256
+  `51548cbe893b5e69e53ff49d5deaa1aa0ac6ebff8017b4ffc228a41681811323`. To
+  reproduce, extract that jar with `jar xf`, read
   `agent-skills/junie-cli-docs/junie-cli-user-disk-storage.md`, and inspect
   `com.intellij.ml.llm.matterhorn.ej.app.cli.standalone.tui.app.state.SessionStore`,
-  `SessionSummary`, `SessionEvent`, `org.jetbrains.a2ux.api.LlmResponseMetadataEvent`,
-  and `org.jetbrains.a2ux.api.ModelUsage` with `javap -p`.
-  The bundled storage document defines `JUNIE_HOME`; `SessionStore` bytecode
-  defines `sessions/index.jsonl`, `sessions/<sessionId>/events.jsonl`, and the
+  `SessionSummary`, `SessionEvent`,
+  `org.jetbrains.a2ux.api.LlmResponseMetadataEvent`, and
+  `org.jetbrains.a2ux.api.ModelUsage` with `javap -p`. The bundled storage
+  document defines `JUNIE_HOME`; `SessionStore` bytecode defines
+  `sessions/index.jsonl`, `sessions/<sessionId>/events.jsonl`, and the
   timestamp append. Producer serializers generated representative
   `UserPromptEvent`, `UserResponseEvent`, `UserAsyncResponseEvent`,
   `SessionTitleSetEvent`, and nested `SessionA2uxEvent` records.
   `SessionStore` atomically replaces the complete index rather than appending
   changed rows, so watcher ingestion compares complete normalized snapshots;
-  the filesystem event does not identify which summary row changed.
+  the filesystem event does not identify which summary row changed. Reverified
+  shared step IDs on 2026-09-28 from the Linux amd64 archive for
+  [release 2285.4](https://github.com/JetBrains/junie/releases/tag/2285.4).
+  Its `junie-release-2285.4.jar` SHA-256 is
+  `e7f7fdccb50ca32981c58f671ed60622f29790f4fa9f65d5b9644f8624b7b75a`.
+  Decompile `com.intellij.ml.llm.matterhorn.a2ux.server.steps.StepEventData`
+  with CFR 0.152: `post` emits `MarkdownBlockUpdatedEvent` for `details`, but
+  emits `ResultBlockUpdatedEvent` instead when `result` is set. Both use the
+  same `stepId`. `JunieSessionSteps.post` also keys active blocks by `stepId`,
+  rather than event kind.
 
 - **Conversation mapping:** `UserPromptEvent` prefers `presentablePrompt` over
-  its internal prompt. Synchronous and asynchronous user-response events become
-  user messages. History committed, dropped, and failed records reconcile
-  queued prompts by `requestId`. Nested A2UX `MarkdownBlockUpdatedEvent` and
-  `ResultBlockUpdatedEvent` records become assistant messages; repeated block
-  updates replace the prior content with the same `stepId`, so active streaming
-  text remains visible without duplicating the final answer. The index supplies
-  session creation and update times; events supply message times.
+  its internal prompt. Synchronous and asynchronous user-response events
+  become user messages. History committed, dropped, and failed records
+  reconcile queued prompts by `requestId`. Nested A2UX
+  `MarkdownBlockUpdatedEvent` and `ResultBlockUpdatedEvent` records become
+  assistant messages; repeated block updates replace the prior content with
+  the same `stepId`, so active streaming text remains visible without
+  duplicating the final answer. A result replaces earlier markdown for that
+  step, matching the producer's block model; markdown with a different step ID
+  remains a separate message. The index supplies session creation and update
+  times; events supply message times. Tool calls, tool results, and file edits
+  are not imported. Malformed event lines are counted and skipped, including a
+  truncated final line, so complete earlier messages remain available.
 
-- **IDE boundary:** The JetBrains ACP registry and local
-  `junie-chronicles.csv` files were inspected on 2026-09-24. Chronicles contain
-  project edit activity, not conversations, and no separate IDE transcript
-  source was found. This provider therefore ingests the shared Junie CLI
-  `SessionStore` only. It does not claim support for IDE-only conversations
-  until JetBrains exposes a reproducible conversation artifact.
+- **IDE boundary:** The JetBrains ACP registry and local `junie-chronicles.csv`
+  files were inspected on 2026-09-24. Chronicles contain project edit
+  activity, not conversations, and no separate IDE transcript source was
+  found. This provider therefore ingests the shared Junie CLI `SessionStore`
+  only. It does not claim support for IDE-only conversations until JetBrains
+  exposes a reproducible conversation artifact.
 
 - **Usage and cost:** Nested A2UX `LlmResponseMetadataEvent.modelUsage` records
   persist the model, producer-reported USD cost, uncached input, cache-read,
   cache-creation, and output tokens for each model response. Agentsview emits
-  one aggregate usage row per record and uses the producer-reported cost rather
-  than catalog pricing. `SessionCostTrajectorySnapshotEvent` totals and
+  one aggregate usage row per record and uses the producer-reported cost
+  rather than catalog pricing. `SessionCostTrajectorySnapshotEvent` totals and
   `completion.taskCostUsd` overlap those response records, so they are not
-  emitted separately.
+  emitted separately. An invalid reported cost rejects the session parse,
+  matching the Goose policy; it is not silently replaced with zero or an
+  estimate.
 
 - **Agentsview:** `internal/parser/junie.go` and
   `internal/parser/junie_provider.go` discover only direct
   `sessions/<session-id>/events.jsonl` members, use content hashing for
   freshness, normalize final messages and model usage, and treat discovery as
-  authoritative for provider membership.
+  authoritative for provider membership. Missing roots do not block discovery
+  in other configured roots. Index watcher events select only changed
+  sessions; failed metadata-only updates recover on the next full sync
+  (normally within 15 minutes) or transcript write. Direct session lookups
+  refresh metadata without consuming the watcher baseline.
+
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go
 [evener-source-3]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/llm/types.go
