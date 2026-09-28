@@ -205,6 +205,25 @@ func TestJunieSourceSetDiscoversOnlyEventStreams(t *testing.T) {
 	assert.Equal(t, "session-one", changed[0].ProjectHint)
 }
 
+func TestJunieFingerprintKeepsExistingSummaryEncoding(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-one", "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "index.jsonl"), []byte(
+		`{"sessionId":"session-one","projectDir":"/a<b&\u2028","taskName":"Demo"}`+"\n",
+	), 0o600))
+
+	provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	sources, err := provider.Discover(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+	fingerprint, err := provider.Fingerprint(t.Context(), sources[0])
+	require.NoError(t, err)
+	assert.Equal(t, "a2af8ce583c1bbf7889a325be37031e072dc2186b045f2f9eb913b2f1a4c8d6c", fingerprint.Hash)
+}
+
 func TestJunieSourceSetReusesIndexSnapshotWhileParsing(t *testing.T) {
 	root := t.TempDir()
 	sessionDir := filepath.Join(root, "session-one")
@@ -742,8 +761,11 @@ func TestOpenJuniePinnedFileRejectsReplacement(t *testing.T) {
 	rootPath := t.TempDir()
 	path := filepath.Join(rootPath, "events.jsonl")
 	require.NoError(t, os.WriteFile(path, []byte("before"), 0o600))
-	expected, err := os.Lstat(path)
+	original, err := os.Open(path)
 	require.NoError(t, err)
+	expected, err := original.Stat() // File.Stat pins the file ID on Windows.
+	require.NoError(t, err)
+	require.NoError(t, original.Close())
 	require.NoError(t, os.Rename(path, filepath.Join(rootPath, "old-events.jsonl")))
 	require.NoError(t, os.WriteFile(path, []byte("after"), 0o600))
 	root, err := os.OpenRoot(rootPath)

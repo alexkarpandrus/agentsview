@@ -108,6 +108,11 @@ func openJunieEventStream(path string, openRoot junieRootOpener) (*os.File, erro
 }
 
 func openJuniePinnedFile(root *os.Root, name string, expected os.FileInfo) (*os.File, error) {
+	// On Windows, Lstat defers loading the file ID until SameFile is called.
+	// Resolve it before opening so a later replacement cannot change the comparison.
+	if !os.SameFile(expected, expected) {
+		return nil, errors.New("file identity unavailable")
+	}
 	f, err := root.Open(name)
 	if err != nil {
 		return nil, err

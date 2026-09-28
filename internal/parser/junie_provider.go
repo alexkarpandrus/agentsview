@@ -4,7 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -399,7 +400,13 @@ func (s junieSourceSet) Fingerprint(
 	if present {
 		// Scope shared index metadata to this session so one summary update does not
 		// invalidate every transcript under the Junie root.
-		data, err := json.Marshal(summary)
+		// Match the v1 encoding used by existing source fingerprints.
+		data, err := json.Marshal(summary,
+			json.OmitZeroStructFields(true),
+			jsontext.EscapeForHTML(true),
+			jsontext.EscapeForJS(true),
+			jsontext.AllowInvalidUTF8(true),
+		)
 		if err != nil {
 			return SourceFingerprint{}, fmt.Errorf("marshal Junie index summary: %w", err)
 		}
