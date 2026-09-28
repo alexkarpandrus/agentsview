@@ -757,3 +757,50 @@ func TestOpenJuniePinnedFileRejectsReplacement(t *testing.T) {
 	_, err = openJuniePinnedFile(root, "events.jsonl", expected)
 	require.ErrorContains(t, err, "changed while opening")
 }
+
+func TestJunieRejectsOversizedRecords(t *testing.T) {
+	for _, target := range []string{"events.jsonl", "index.jsonl"} {
+		t.Run(target, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "session-one", "events.jsonl")
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+			require.NoError(t, os.WriteFile(path, []byte(`{"kind":"UserPromptEvent","prompt":"Keep me"}`+"\n"), 0o600))
+			indexPath := filepath.Join(root, "index.jsonl")
+			index := `{"sessionId":"session-one","taskName":"Original title"}` + "\n"
+			require.NoError(t, os.WriteFile(indexPath, []byte(index), 0o600))
+			provider, ok := NewProvider(AgentJunie, ProviderConfig{Roots: []string{root}})
+			require.True(t, ok)
+			sources, err := provider.Discover(t.Context())
+			require.NoError(t, err)
+			require.Len(t, sources, 1)
+			before, err := provider.Fingerprint(t.Context(), sources[0])
+			require.NoError(t, err)
+
+			oversizedPath := path
+			if target == "index.jsonl" {
+				oversizedPath = indexPath
+			}
+			file, err := os.OpenFile(oversizedPath, os.O_WRONLY|os.O_APPEND, 0)
+			require.NoError(t, err)
+			_, err = file.WriteString(`{"sessionId":"session-one","kind":"UserResponseEvent","prompt":"` + strings.Repeat("x", maxLineSize) + `"}` + "\n")
+			require.NoError(t, err)
+			require.NoError(t, file.Close())
+
+			if target == "events.jsonl" {
+				outcome, err := provider.Parse(t.Context(), ParseRequest{Source: sources[0]})
+				require.ErrorContains(t, err, "record exceeds")
+				assert.Empty(t, outcome.Results)
+			} else {
+				_, err := provider.SourcesForChangedPath(t.Context(), ChangedPathRequest{Path: indexPath})
+				require.ErrorContains(t, err, "record exceeds")
+				after, err := provider.Fingerprint(t.Context(), sources[0])
+				require.NoError(t, err)
+				assert.Equal(t, before.Hash, after.Hash, "rejected index must retain the active metadata")
+				require.NoError(t, os.WriteFile(indexPath, []byte(index), 0o600))
+				relevance, err := ResolveChangedPathRelevance(t.Context(), provider, ChangedPathRequest{Path: indexPath})
+				require.NoError(t, err)
+				assert.Equal(t, ChangedPathNonData, relevance, "rejected index must retain the watcher baseline")
+			}
+		})
+	}
+}

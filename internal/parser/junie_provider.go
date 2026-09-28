@@ -118,7 +118,7 @@ func (s junieSourceSet) FindSource(
 		return SourceRef{}, false, err
 	}
 	if !present {
-		return source, true, nil
+		snapshot = make(map[string]junieIndexSummary)
 	}
 	s.indexCache.setActiveSnapshot(indexPath, snapshot)
 	return source, true, nil
@@ -451,6 +451,9 @@ func loadJunieIndexSnapshot(
 	}
 	if err := lr.Err(); err != nil {
 		return nil, false, fmt.Errorf("reading Junie index %s: %w", path, err)
+	}
+	if lr.skippedOversized {
+		return nil, false, fmt.Errorf("reading Junie index %s: record exceeds %d bytes", path, maxLineSize)
 	}
 	return summaries, true, nil
 }

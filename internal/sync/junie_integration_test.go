@@ -382,3 +382,40 @@ func TestJunieDirectSyncPreservesWatcherBaseline(t *testing.T) {
 		})
 	}
 }
+
+func TestJunieDirectSyncClearsMissingIndexMetadata(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-one", "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"kind":"UserPromptEvent","prompt":"Keep me","timestampMs":1704067201000}`+"\n",
+	), 0o600))
+	indexPath := filepath.Join(root, "index.jsonl")
+	require.NoError(t, os.WriteFile(indexPath, []byte(
+		`{"sessionId":"session-one","taskName":"Old title","projectDir":"/work/demo","createdAt":1704067200000,"updatedAt":1704067202000}`+"\n",
+	), 0o600))
+	database := openTestDB(t)
+	engine := NewEngine(t.Context(), database, EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+		Machine:   "test",
+	})
+	t.Cleanup(engine.Close)
+	require.Equal(t, 1, engine.SyncAll(t.Context(), nil).Synced)
+
+	require.NoError(t, os.Remove(indexPath))
+	require.NoError(t, engine.SyncSingleSession("junie:session-one"))
+	session, err := database.GetSessionFull(t.Context(), "junie:session-one")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	assert.Nil(t, session.SessionName)
+	assert.Equal(t, "junie", session.Project)
+	assert.Empty(t, session.Cwd)
+	require.NotNil(t, session.StartedAt)
+	require.NotNil(t, session.EndedAt)
+	assert.Equal(t, "2024-01-01T00:00:01Z", *session.StartedAt)
+	assert.Equal(t, "2024-01-01T00:00:01Z", *session.EndedAt)
+	messages, err := database.GetMessages(t.Context(), "junie:session-one", 0, 100, true)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "Keep me", messages[0].Content)
+}

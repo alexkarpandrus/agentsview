@@ -3488,6 +3488,10 @@ schemas keep their existing ordering behavior.
   times; events supply message times. Tool calls, tool results, and file edits
   are not imported. Malformed event lines are counted and skipped, including a
   truncated final line, so complete earlier messages remain available.
+  Agentsview rejects event streams and index snapshots containing a record
+  over 64 MiB, preserving the archived session and cached index. This is an
+  Agentsview limit, not a producer limit. When the index is absent, both full
+  and direct session syncs remove cached index metadata and use event data.
 
 - **IDE boundary:** The JetBrains ACP registry and local `junie-chronicles.csv`
   files were inspected on 2026-09-24. Chronicles contain project edit
