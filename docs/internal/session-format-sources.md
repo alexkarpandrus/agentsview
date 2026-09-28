@@ -3448,32 +3448,39 @@ schemas keep their existing ordering behavior.
   and
   [JetBrains Marketplace listing](https://plugins.jetbrains.com/plugin/26104-junie-the-ai-coding-agent-by-jetbrains)
   were searched 2026-09-24; no public persistence source or authoritative
-  event schema was found. The format was reverified from the installed Junie
-  CLI 26.7.13 producer jar `junie-release-2285.4.jar`, SHA-256
-  `51548cbe893b5e69e53ff49d5deaa1aa0ac6ebff8017b4ffc228a41681811323`. To
-  reproduce, extract that jar with `jar xf`, read
+  event schema was found. Use the public
+  [Linux amd64 archive for release 2285.4](https://github.com/JetBrains/junie/releases/download/2285.4/junie-release-2285.4-linux-amd64.zip)
+  to reproduce this entry. Its `junie-app/lib/app/junie-release-2285.4.jar`
+  has SHA-256
+  `e7f7fdccb50ca32981c58f671ed60622f29790f4fa9f65d5b9644f8624b7b75a`. Storage
+  paths, index replacement, model usage, and shared step IDs were reverified
+  from this artifact on 2026-09-28. Extract the jar with `jar xf`, read
   `agent-skills/junie-cli-docs/junie-cli-user-disk-storage.md`, and inspect
   `com.intellij.ml.llm.matterhorn.ej.app.cli.standalone.tui.app.state.SessionStore`,
   `SessionSummary`, `SessionEvent`,
   `org.jetbrains.a2ux.api.LlmResponseMetadataEvent`, and
-  `org.jetbrains.a2ux.api.ModelUsage` with `javap -p`. The bundled storage
-  document defines `JUNIE_HOME`; `SessionStore` bytecode defines
-  `sessions/index.jsonl`, `sessions/<sessionId>/events.jsonl`, and the
-  timestamp append. Producer serializers generated representative
-  `UserPromptEvent`, `UserResponseEvent`, `UserAsyncResponseEvent`,
-  `SessionTitleSetEvent`, and nested `SessionA2uxEvent` records.
-  `SessionStore` atomically replaces the complete index rather than appending
-  changed rows, so watcher ingestion compares complete normalized snapshots;
-  the filesystem event does not identify which summary row changed. Reverified
-  shared step IDs on 2026-09-28 from the Linux amd64 archive for
-  [release 2285.4](https://github.com/JetBrains/junie/releases/tag/2285.4).
-  Its `junie-release-2285.4.jar` SHA-256 is
-  `e7f7fdccb50ca32981c58f671ed60622f29790f4fa9f65d5b9644f8624b7b75a`.
-  Decompile `com.intellij.ml.llm.matterhorn.a2ux.server.steps.StepEventData`
-  with CFR 0.152: `post` emits `MarkdownBlockUpdatedEvent` for `details`, but
-  emits `ResultBlockUpdatedEvent` instead when `result` is set. Both use the
-  same `stepId`. `JunieSessionSteps.post` also keys active blocks by `stepId`,
-  rather than event kind.
+  `org.jetbrains.a2ux.api.ModelUsage` with CFR 0.152 or `javap -p -c`. The
+  bundled storage document defines `JUNIE_HOME`; `SessionStore` bytecode
+  defines `sessions/index.jsonl`, `sessions/<sessionId>/events.jsonl`, and the
+  timestamp append. `SessionStore` atomically replaces the complete index
+  rather than appending changed rows, so the filesystem event does not
+  identify which summary row changed.
+
+    The initial investigation used an installed CLI 26.7.13 jar with the same
+    filename and SHA-256
+    `51548cbe893b5e69e53ff49d5deaa1aa0ac6ebff8017b4ffc228a41681811323`. Its
+    distribution archive was not recorded, so the reason for the different bytes
+    is unknown. That hash is historical evidence; use the public Linux artifact
+    above for reproduction. The initial producer serializers generated
+    representative `UserPromptEvent`, `UserResponseEvent`,
+    `UserAsyncResponseEvent`, `SessionTitleSetEvent`, and nested
+    `SessionA2uxEvent` records.
+
+    Decompile `com.intellij.ml.llm.matterhorn.a2ux.server.steps.StepEventData`
+    with CFR 0.152: `post` emits `MarkdownBlockUpdatedEvent` for `details`, but
+    emits `ResultBlockUpdatedEvent` instead when `result` is set. Both use the
+    same `stepId`. `JunieSessionSteps.post` also keys active blocks by `stepId`,
+    rather than event kind.
 
 - **Conversation mapping:** `UserPromptEvent` prefers `presentablePrompt` over
   its internal prompt. Synchronous and asynchronous user-response events
@@ -3515,10 +3522,18 @@ schemas keep their existing ordering behavior.
   `sessions/<session-id>/events.jsonl` members, use content hashing for
   freshness, normalize final messages and model usage, and treat discovery as
   authoritative for provider membership. Missing roots do not block discovery
-  in other configured roots. Index watcher events select only changed
-  sessions; failed metadata-only updates recover on the next full sync
-  (normally within 15 minutes) or transcript write. Direct session lookups
-  refresh metadata without consuming the watcher baseline.
+  in other configured roots. A corrupt index keeps its last complete cached
+  snapshot and does not block healthy roots. Without a cached snapshot, that
+  root's sessions wait for a valid index; their archived data remains intact.
+  Direct session lookups and index watcher updates still report invalid
+  indexes. With an in-memory baseline, index watcher events select only
+  changed sessions. A fresh engine selects every session listed in the index.
+  Remote delta imports create a fresh planning engine each time, so an index
+  change re-hashes all listed transcripts even if only one summary changed.
+  The local daemon's startup sync establishes its baseline first. Failed
+  metadata-only updates recover on the next full sync (normally within 15
+  minutes) or transcript write. Direct session lookups refresh metadata
+  without consuming the watcher baseline.
 
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go

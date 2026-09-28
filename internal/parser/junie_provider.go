@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,8 @@ type junieSourceSet struct {
 	JSONLSourceSet
 	indexCache *junieIndexCache
 }
+
+var errInvalidJunieIndex = errors.New("invalid Junie index")
 
 type junieIndexSummary struct {
 	ProjectDir string `json:"projectDir,omitempty"`
@@ -317,7 +320,13 @@ func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 			ctx, indexPath, openJunieRoot,
 		)
 		if err != nil {
-			return err
+			if !errors.Is(err, errInvalidJunieIndex) {
+				return err
+			}
+			// Keep the last complete snapshot. A root without one will fail
+			// its own fingerprint reads without blocking healthy roots.
+			log.Printf("Junie index refresh: %v", err)
+			continue
 		}
 		s.indexCache.mu.Lock()
 		state := s.indexCache.stateLocked(root)
@@ -441,11 +450,11 @@ func loadJunieIndexSnapshot(
 			return nil, false, err
 		}
 		if !gjson.Valid(line) {
-			return nil, false, fmt.Errorf("reading Junie index %s: invalid JSON at line %d", path, lineNumber)
+			return nil, false, fmt.Errorf("%w %s: invalid JSON at line %d", errInvalidJunieIndex, path, lineNumber)
 		}
 		sessionID := gjson.Get(line, "sessionId").Str
 		if sessionID == "" {
-			return nil, false, fmt.Errorf("reading Junie index %s: missing sessionId at line %d", path, lineNumber)
+			return nil, false, fmt.Errorf("%w %s: missing sessionId at line %d", errInvalidJunieIndex, path, lineNumber)
 		}
 		summaries[sessionID] = parseJunieIndexSummary(line)
 	}
@@ -453,7 +462,7 @@ func loadJunieIndexSnapshot(
 		return nil, false, fmt.Errorf("reading Junie index %s: %w", path, err)
 	}
 	if lr.skippedOversized {
-		return nil, false, fmt.Errorf("reading Junie index %s: record exceeds %d bytes", path, maxLineSize)
+		return nil, false, fmt.Errorf("%w %s: record exceeds %d bytes", errInvalidJunieIndex, path, maxLineSize)
 	}
 	return summaries, true, nil
 }

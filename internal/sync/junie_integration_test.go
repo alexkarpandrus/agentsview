@@ -419,3 +419,58 @@ func TestJunieDirectSyncClearsMissingIndexMetadata(t *testing.T) {
 	require.Len(t, messages, 1)
 	assert.Equal(t, "Keep me", messages[0].Content)
 }
+
+func TestJunieBadIndexDoesNotBlockHealthyRoot(t *testing.T) {
+	for _, tc := range []struct{ name, record string }{
+		{"invalid JSON", "{"},
+		{"missing session ID", `{"taskName":"Bad row"}`},
+		{"oversized", `{"sessionId":"session-one","taskName":"` + strings.Repeat("x", 64*1024*1024) + `"}`},
+	} {
+		for _, restart := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/restart=%t", tc.name, restart), func(t *testing.T) {
+				badRoot, healthyRoot := t.TempDir(), t.TempDir()
+				events := filepath.Join(badRoot, "session-one", "events.jsonl")
+				require.NoError(t, os.MkdirAll(filepath.Dir(events), 0o755))
+				require.NoError(t, os.WriteFile(events, []byte(`{"kind":"UserPromptEvent","prompt":"Keep me"}`+"\n"), 0o600))
+				index := filepath.Join(badRoot, "index.jsonl")
+				require.NoError(t, os.WriteFile(index, []byte(`{"sessionId":"session-one","taskName":"Original title","projectDir":"/work/demo"}`+"\n"), 0o600))
+				database := openTestDB(t)
+				cfg := EngineConfig{
+					AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {badRoot, healthyRoot}},
+					Machine:   "test",
+				}
+				engine := NewEngine(t.Context(), database, cfg)
+				require.Equal(t, 1, engine.SyncAll(t.Context(), nil).Synced)
+				if restart {
+					engine.Close()
+					engine = NewEngine(t.Context(), database, cfg)
+				}
+				t.Cleanup(engine.Close)
+				require.NoError(t, os.WriteFile(index, []byte(tc.record+"\n"), 0o600))
+				events = filepath.Join(healthyRoot, "session-two", "events.jsonl")
+				require.NoError(t, os.MkdirAll(filepath.Dir(events), 0o755))
+				require.NoError(t, os.WriteFile(events, []byte(`{"kind":"UserPromptEvent","prompt":"New conversation"}`+"\n"), 0o600))
+
+				engine.SyncAll(t.Context(), nil)
+				messages, err := database.GetMessages(t.Context(), "junie:session-two", 0, 100, true)
+				require.NoError(t, err)
+				require.Len(t, messages, 1)
+				assert.Equal(t, "New conversation", messages[0].Content)
+				saved, err := database.GetSessionFull(t.Context(), "junie:session-one")
+				require.NoError(t, err)
+				require.NotNil(t, saved)
+				require.NotNil(t, saved.SessionName)
+				assert.Equal(t, "Original title", *saved.SessionName)
+				assert.Equal(t, "demo", saved.Project)
+
+				require.NoError(t, os.WriteFile(index, []byte(`{"sessionId":"session-one","taskName":"Repaired title"}`+"\n"), 0o600))
+				engine.SyncAll(t.Context(), nil)
+				saved, err = database.GetSessionFull(t.Context(), "junie:session-one")
+				require.NoError(t, err)
+				require.NotNil(t, saved)
+				require.NotNil(t, saved.SessionName)
+				assert.Equal(t, "Repaired title", *saved.SessionName)
+			})
+		}
+	}
+}
