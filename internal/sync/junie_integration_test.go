@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -530,4 +531,20 @@ func TestJunieSuccessfulResyncSwapAcknowledgesFreshSkip(t *testing.T) {
 	plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
 	require.NoError(t, err)
 	assert.Empty(t, plan.Files, "a confirmed-fresh live skip should acknowledge the retry")
+
+	// Restore the archived metadata after a changed-path event so the next
+	// retry is fresh but cannot use the old index stat-digest shortcut.
+	writeIndex("Before")
+	plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	require.Len(t, plan.Files, 1)
+	writeIndex("After")
+	modified := time.Now().Add(time.Hour)
+	require.NoError(t, os.Chtimes(indexPath, modified, modified))
+	cached := engine.SyncAll(t.Context(), nil)
+	require.Zero(t, cached.Synced)
+	require.Equal(t, 1, cached.Skipped)
+	plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	assert.Empty(t, plan.Files, "a content-verified cached skip should acknowledge the retry")
 }
