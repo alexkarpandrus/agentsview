@@ -32,6 +32,7 @@ func TestPreparePGRawSyncServicesRegistersHostedRoutes(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/raw-sync/tokens",
 		"/api/v1/raw-sync/status",
+		"/api/v1/raw-sync/health",
 		"/api/v1/raw-sync/objects/missing",
 		"/api/v1/raw-sync/manifests",
 		"/api/v1/raw-sync/uploads",

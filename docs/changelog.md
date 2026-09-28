@@ -61,6 +61,11 @@ The latest published release is
 
 **Improvements**
 
+- Turning a session provider on or off, or adding or removing an alternate
+  home, on the Settings page now takes effect without restarting the daemon.
+  New sessions in a newly enabled provider or home are picked up as they are
+  written, and sessions already on disk arrive with the next sync. Separate
+  `push --watch` processes still need a restart.
 - Syncing uses less CPU to check transcript text for invalid characters. Clean
   text is now checked in one pass and stored unchanged. In a full sync of a
   950 MB local test corpus, total CPU time fell about 4%. Wall-clock time did
@@ -268,6 +273,9 @@ The latest published release is
 - Clicking the selected value in the session filter's minimum-prompts row clears
   the filter instead of leaving it set, so it can be turned off without
   clearing the other filters.
+- Transcripts that grow while a sync is reading them no longer cause a full
+  re-parse on the next sync. The incremental path now stores the file size and
+  modification time from the same read.
 
 **Acknowledgements**
 

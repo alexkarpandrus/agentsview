@@ -76,9 +76,15 @@ const (
 
 // Server is the HTTP server that serves the SPA and REST API.
 type Server struct {
-	mu                    gosync.RWMutex
-	cfg                   config.Config
-	activeDisabledAgents  []parser.AgentType
+	mu                   gosync.RWMutex
+	cfg                  config.Config
+	activeDisabledAgents []parser.AgentType
+	// ingestionReloader applies saved provider settings to the running
+	// daemon; settingsApplyMu keeps saves and their reloads in order.
+	ingestionReloader IngestionReloader
+	settingsApplyMu   gosync.Mutex
+	// onDemandReconfigureMu serializes source updates to onDemandEngine.
+	onDemandReconfigureMu gosync.Mutex
 	db                    db.Store
 	activityReports       *activityReportCache
 	assetCache            *assetCache
@@ -195,6 +201,7 @@ type Server struct {
 	rawSyncStatus          RawSyncStatusReader
 	rawSyncSchemaOnly      bool
 	rawSyncUploads         RawSyncUploads
+	rawSyncJobHealth       RawSyncJobHealth
 
 	ensurePricing func(context.Context, *db.DB) error
 }
@@ -290,14 +297,15 @@ func insightGenerateOptions(cfg config.Config) insight.GenerateOptions {
 	return opts
 }
 
-// ingestionConfig returns the daemon-start configuration for local filesystem
-// provider selection. Settings updates are persisted and reflected by GET
-// immediately, but the running local engine, watchers, and polling keep one
-// provider set until restart. Remote import and export ignore DisabledAgents.
+// ingestionConfig returns the configuration for local filesystem provider
+// selection as the running daemon applies it. Without an IngestionReloader,
+// settings updates are persisted and reflected by GET immediately, but the
+// running local engine, watchers, and polling keep the startup provider set.
+// Remote import and export ignore DisabledAgents.
 func (s *Server) ingestionConfig() config.Config {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	cfg := s.cfg
-	s.mu.RUnlock()
 	cfg.DisabledAgents = append(
 		[]parser.AgentType(nil), s.activeDisabledAgents...,
 	)
@@ -306,6 +314,18 @@ func (s *Server) ingestionConfig() config.Config {
 
 // Option configures a Server.
 type Option func(*Server)
+
+// IngestionReloader reloads the saved session provider settings and applies
+// them to the running daemon's sync engine, watchers, and polling. It returns
+// the reloaded configuration once accepted; applying it to the engine may
+// finish in the background.
+type IngestionReloader func(ctx context.Context) (config.Config, error)
+
+// WithIngestionReloader applies provider settings changes without a daemon
+// restart.
+func WithIngestionReloader(r IngestionReloader) Option {
+	return func(s *Server) { s.ingestionReloader = r }
+}
 
 // RawSyncDeviceAuth exchanges device credentials and authenticates scoped
 // raw-transport tokens.
@@ -366,6 +386,15 @@ type RawSyncUploads interface {
 	) (rawsync.UploadSession, error)
 }
 
+// RawSyncJobHealth exposes read-only tenant-scoped raw parse-job health.
+type RawSyncJobHealth interface {
+	RawJobHealth(
+		context.Context,
+		rawsync.AuthIdentity,
+		rawsync.JobHealthQuery,
+	) (rawsync.JobHealthReport, error)
+}
+
 // WithRawSyncServices enables authenticated raw-sync machine routes.
 func WithRawSyncServices(auth RawSyncDeviceAuth, custody RawSyncCustody) Option {
 	return func(s *Server) {
@@ -385,6 +414,13 @@ func WithRawSyncUploads(uploads RawSyncUploads) Option {
 func WithRawSyncStatus(status RawSyncStatusReader) Option {
 	return func(s *Server) {
 		s.rawSyncStatus = status
+	}
+}
+
+// WithRawSyncJobHealth enables the scoped raw parse-job health read.
+func WithRawSyncJobHealth(health RawSyncJobHealth) Option {
+	return func(s *Server) {
+		s.rawSyncJobHealth = health
 	}
 }
 
