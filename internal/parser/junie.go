@@ -49,7 +49,7 @@ type junieParserState struct {
 
 type junieRootOpener func(string) (*os.Root, error)
 
-func openValidatedJunieRoot(path string) (*os.Root, os.FileInfo, error) {
+func openValidatedJunieRoot(path string, openRoot junieRootOpener) (*os.Root, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, nil, err
@@ -58,11 +58,11 @@ func openValidatedJunieRoot(path string) (*os.Root, os.FileInfo, error) {
 		return nil, nil, errors.New("junie root is not a directory")
 	}
 	// On Windows, os.Lstat resolves the file ID only when SameFile is called.
-	// Pin it before opening the root, so a replacement cannot change its identity.
+	// Resolve it before opening the root to detect replacements after this lookup.
 	if !os.SameFile(info, info) {
 		return nil, nil, errors.New("junie root changed while opening")
 	}
-	root, err := os.OpenRoot(path)
+	root, err := openRoot(path)
 	if err != nil {
 		return nil, nil, err
 	}

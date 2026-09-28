@@ -83,7 +83,7 @@ func (c *junieIndexCache) openRootForDiscovery(path string) (*os.Root, error) {
 
 func (c *junieIndexCache) openRootGeneration(path string, allowRepin bool) (*os.Root, error) {
 	path = filepath.Clean(path)
-	root, info, err := openValidatedJunieRoot(path)
+	root, info, err := openValidatedJunieRoot(path, os.OpenRoot)
 	if err != nil {
 		c.mu.Lock()
 		state := c.roots[path]

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -494,6 +495,23 @@ func TestJunieConfiguredRootIdentityIsPinned(t *testing.T) {
 
 	_, err = provider.Fingerprint(t.Context(), sources[0])
 	require.ErrorContains(t, err, "junie root identity changed")
+}
+
+func TestOpenValidatedJunieRootRejectsReplacementDuringOpen(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("os.Lstat file IDs are eager on this platform")
+	}
+	parent := t.TempDir()
+	path := filepath.Join(parent, "sessions")
+	require.NoError(t, os.Mkdir(path, 0o755))
+
+	// The opener replaces the configured root after its identity is pinned.
+	_, _, err := openValidatedJunieRoot(path, func(name string) (*os.Root, error) {
+		require.NoError(t, os.Rename(path, filepath.Join(parent, "moved")))
+		require.NoError(t, os.Mkdir(path, 0o755))
+		return os.OpenRoot(name)
+	})
+	require.ErrorContains(t, err, "junie root changed while opening")
 }
 
 func TestJunieDiscoveryRepinsRecreatedConfiguredRoot(t *testing.T) {
