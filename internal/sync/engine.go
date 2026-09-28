@@ -10388,6 +10388,9 @@ func (e *Engine) collectAndBatchWithOptions(
 					for _, ownership := range exactOwnerships {
 						baselineExactOwnership(ownership)
 					}
+					if writeMode != syncWriteBulk && r.providerSyncAck != nil {
+						r.providerSyncAck()
+					}
 				}
 			}
 			progress.SessionsDone++
@@ -11766,8 +11769,9 @@ func (e *Engine) processProviderFile(
 			verifiedCapture.signature.size, verifiedMtime,
 		) {
 			return processResult{
-				skip:  true,
-				mtime: verifiedMtime,
+				skip:            true,
+				mtime:           verifiedMtime,
+				providerSyncAck: providerSourceSyncAck(provider, source),
 			}, true
 		}
 		e.invalidateVerifiedSource(
@@ -11832,8 +11836,9 @@ func (e *Engine) processProviderFile(
 				e.promoteVerifiedSource(verifiedCapture)
 			}
 			return processResult{
-				skip:  true,
-				mtime: freshMTime,
+				skip:            true,
+				mtime:           freshMTime,
+				providerSyncAck: providerSourceSyncAck(provider, source),
 			}, true
 		}
 	}
@@ -11891,8 +11896,9 @@ func (e *Engine) processProviderFile(
 					)
 				}
 				return processResult{
-					skip:  true,
-					mtime: mtime,
+					skip:            true,
+					mtime:           mtime,
+					providerSyncAck: providerSourceSyncAck(provider, source),
 				}, true
 			}
 			// A gate-eligible local source without a comparable stored hash
@@ -12105,11 +12111,12 @@ func (e *Engine) processProviderFile(
 						)
 					}
 					return processResult{
-						skip:       true,
-						mtime:      fingerprint.MTimeNS,
-						cacheSkip:  true,
-						cachedSkip: true,
-						cacheKey:   cacheKey,
+						skip:            true,
+						mtime:           fingerprint.MTimeNS,
+						cacheSkip:       true,
+						cachedSkip:      true,
+						cacheKey:        cacheKey,
+						providerSyncAck: providerSourceSyncAck(provider, source),
 					}, true
 				}
 				// A commit raced cache validation and tracker restoration.
@@ -12120,14 +12127,12 @@ func (e *Engine) processProviderFile(
 	if cacheSkip && !forceSourceCwdParse && e.shouldSkipProviderSource(ctx,
 		file, source, fingerprint, providerSemantics,
 	) {
-		if acknowledge := providerSourceSyncAck(provider, source); acknowledge != nil {
-			acknowledge()
-		}
 		return processResult{
-			skip:      true,
-			mtime:     fingerprint.MTimeNS,
-			cacheSkip: true,
-			cacheKey:  cacheKey,
+			skip:            true,
+			mtime:           fingerprint.MTimeNS,
+			cacheSkip:       true,
+			cacheKey:        cacheKey,
+			providerSyncAck: providerSourceSyncAck(provider, source),
 		}, true
 	}
 
@@ -12199,11 +12204,12 @@ func (e *Engine) processProviderFile(
 				)
 			}
 			return processResult{
-				skip:        true,
-				mtime:       fingerprint.MTimeNS,
-				cacheSkip:   cacheSkip,
-				cacheKey:    cacheKey,
-				noCacheSkip: true,
+				skip:            true,
+				mtime:           fingerprint.MTimeNS,
+				cacheSkip:       cacheSkip,
+				cacheKey:        cacheKey,
+				noCacheSkip:     true,
+				providerSyncAck: providerSourceSyncAck(provider, source),
 			}, true
 		}
 	}
@@ -12223,10 +12229,11 @@ func (e *Engine) processProviderFile(
 			ctx, source, fingerprint, providerSemantics, preParseStatHash,
 		) {
 		return processResult{
-			skip:      true,
-			mtime:     fingerprint.MTimeNS,
-			cacheSkip: cacheSkip,
-			cacheKey:  cacheKey,
+			skip:            true,
+			mtime:           fingerprint.MTimeNS,
+			cacheSkip:       cacheSkip,
+			cacheKey:        cacheKey,
+			providerSyncAck: providerSourceSyncAck(provider, source),
 		}, true
 	}
 
@@ -20201,6 +20208,9 @@ func (e *Engine) processAndWriteSessionFile(
 			return false, sessionsChanged, fmt.Errorf(
 				"link fresh subagent sessions: %w", err,
 			)
+		}
+		if res.providerSyncAck != nil {
+			res.providerSyncAck()
 		}
 		return false, sessionsChanged, nil
 	}

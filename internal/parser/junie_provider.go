@@ -73,6 +73,22 @@ func (c *junieIndexCache) stateLocked(root string) *junieRootState {
 	return state
 }
 
+// observeSnapshot retains changes found outside watcher classification until a
+// live source write or confirmed-fresh skip acknowledges each affected session.
+func (state *junieRootState) observeSnapshot(snapshot map[string]junieIndexSummary) {
+	if state.watchSummaries != nil {
+		changed := changedJunieSummaryIDs(state.watchSummaries, snapshot)
+		if len(changed) > 0 && state.retryIDs == nil {
+			state.retryIDs = make(map[string]struct{}, len(changed))
+		}
+		for _, sessionID := range changed {
+			state.retryIDs[sessionID] = struct{}{}
+		}
+	}
+	state.watchSummaries = snapshot
+	state.activeSummaries = snapshot
+}
+
 func (c *junieIndexCache) openRoot(path string) (*os.Root, error) {
 	return c.openRootGeneration(path, false)
 }
@@ -453,19 +469,7 @@ func (s junieSourceSet) refreshJunieIndexes(ctx context.Context) error {
 				snapshot = map[string]junieIndexSummary{}
 			}
 		}
-		// Discovery can run in a replacement-archive build that is later
-		// discarded. Retain new index changes until a live write acknowledges them.
-		if state.watchSummaries != nil {
-			changed := changedJunieSummaryIDs(state.watchSummaries, snapshot)
-			if len(changed) > 0 && state.retryIDs == nil {
-				state.retryIDs = make(map[string]struct{}, len(changed))
-			}
-			for _, sessionID := range changed {
-				state.retryIDs[sessionID] = struct{}{}
-			}
-		}
-		state.watchSummaries = snapshot
-		state.activeSummaries = snapshot
+		state.observeSnapshot(snapshot)
 		s.indexCache.mu.Unlock()
 	}
 	return nil
@@ -506,7 +510,7 @@ func (c *junieIndexCache) setActiveSnapshot(
 ) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.stateLocked(filepath.Dir(indexPath)).activeSummaries = snapshot
+	c.stateLocked(filepath.Dir(indexPath)).observeSnapshot(snapshot)
 }
 
 func (c *junieIndexCache) rememberParseSummary(

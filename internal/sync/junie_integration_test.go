@@ -366,6 +366,49 @@ func TestSyncJunieSingleSessionWriteAcknowledgesIndexPlan(t *testing.T) {
 	assert.Empty(t, replanned.FallbackProviders)
 }
 
+func TestJunieDirectSyncAcknowledgesOnlyItsIndexRow(t *testing.T) {
+	root := t.TempDir()
+	for _, id := range []string{"session-one", "session-two"} {
+		path := filepath.Join(root, id, "events.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(
+			`{"kind":"UserPromptEvent","requestId":"request","prompt":"Hello"}`+"\n",
+		), 0o600))
+	}
+	indexPath := filepath.Join(root, "index.jsonl")
+	writeIndex := func(one, two string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(indexPath, []byte(fmt.Sprintf(
+			`{"sessionId":"session-one","taskName":%q}`+"\n"+
+				`{"sessionId":"session-two","taskName":%q}`+"\n", one, two,
+		)), 0o600))
+	}
+	writeIndex("Before", "Before")
+	database := openTestDB(t)
+	engine := NewEngine(t.Context(), database, EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+		Machine:   "test",
+	})
+	t.Cleanup(engine.Close)
+	require.Equal(t, 2, engine.SyncAll(t.Context(), nil).Synced)
+
+	writeIndex("After", "After")
+	require.NoError(t, engine.SyncSingleSession("junie:session-one"))
+	one, err := database.GetSessionFull(t.Context(), "junie:session-one")
+	require.NoError(t, err)
+	require.NotNil(t, one.SessionName)
+	assert.Equal(t, "After", *one.SessionName)
+	two, err := database.GetSessionFull(t.Context(), "junie:session-two")
+	require.NoError(t, err)
+	require.NotNil(t, two.SessionName)
+	assert.Equal(t, "Before", *two.SessionName)
+
+	plan, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	require.Len(t, plan.Files, 1, "only the still-stale sibling should be scheduled")
+	assert.Equal(t, filepath.Join(root, "session-two", "events.jsonl"), plan.Files[0].Path)
+}
+
 func TestJunieDiscardedResyncBuildKeepsIndexRetry(t *testing.T) {
 	for _, preplanned := range []bool{false, true} {
 		name := "without_preplan"
@@ -424,4 +467,54 @@ func TestJunieDiscardedResyncBuildKeepsIndexRetry(t *testing.T) {
 			assert.Empty(t, retry.Files)
 		})
 	}
+}
+
+func TestJunieSuccessfulResyncSwapAcknowledgesFreshSkip(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-one", "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"kind":"UserPromptEvent","requestId":"request","prompt":"Hello"}`+"\n",
+	), 0o600))
+	indexPath := filepath.Join(root, "index.jsonl")
+	writeIndex := func(name string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(indexPath, []byte(fmt.Sprintf(
+			`{"sessionId":"session-one","taskName":%q}`+"\n", name,
+		)), 0o600))
+	}
+	writeIndex("Before")
+	database := openTestDB(t)
+	engine := NewEngine(t.Context(), database, EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{parser.AgentJunie: {root}},
+		Machine:   "test",
+	})
+	t.Cleanup(engine.Close)
+	require.Equal(t, 1, engine.SyncAll(t.Context(), nil).Synced)
+
+	writeIndex("After")
+	plan, err := engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	require.Len(t, plan.Files, 1)
+	tempPath, stats, err := engine.ResyncBuild(t.Context(), nil)
+	require.NoError(t, err)
+	require.False(t, stats.Aborted)
+	installed, err := engine.SwapResyncDatabase(tempPath)
+	require.NoError(t, err)
+	require.True(t, installed)
+	require.NoError(t, engine.ResetCachesAfterSwap(t.Context()))
+	sess, err := database.GetSessionFull(t.Context(), "junie:session-one")
+	require.NoError(t, err)
+	require.NotNil(t, sess.SessionName)
+	assert.Equal(t, "After", *sess.SessionName)
+
+	plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	require.Len(t, plan.Files, 1, "the swap must not acknowledge pending index work")
+	warm := engine.SyncAll(t.Context(), nil)
+	require.Zero(t, warm.Synced)
+	require.Equal(t, 1, warm.Skipped)
+	plan, err = engine.PlanChangedPathsContext(t.Context(), []string{indexPath})
+	require.NoError(t, err)
+	assert.Empty(t, plan.Files, "a confirmed-fresh live skip should acknowledge the retry")
 }
